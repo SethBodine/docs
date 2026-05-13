@@ -3,8 +3,7 @@ import {
   Upload, Shield, FileText, AlertTriangle, CheckCircle,
   XCircle, Info, ChevronDown, ChevronRight, Eye, EyeOff,
   Link, User, Clock, Hash, Layers, Code
-} from 'lucide-react';
-import DOMPurify from 'dompurify';
+} from 'lucide-react';import DOMPurify from 'dompurify';
 import * as XLSX from 'xlsx';
 
 // ─── PDF.js (lazy loaded to avoid SSR issues) ───────────────────────────────
@@ -193,7 +192,7 @@ async function analysePdf(arrayBuffer) {
     });
   }
 
-  return { findings, metadata, textContent: textContent.slice(0, 5000), pageCount, externalLinks };
+  return { findings, metadata, textContent: textContent.slice(0, 5000), pageCount, externalLinks, previewData: { type: 'pdf', arrayBuffer } };
 }
 
 async function analyseOffice(arrayBuffer, ext) {
@@ -451,7 +450,7 @@ async function analyseOffice(arrayBuffer, ext) {
     findings.push({ severity: 'medium', category: 'Parse Error', title: 'Could not parse document', detail: err.message });
   }
 
-  return { findings, metadata, textContent: (typeof textContent === 'string' ? textContent : '').slice(0, 5000), externalLinks };
+  return { findings, metadata, textContent: (typeof textContent === 'string' ? textContent : '').slice(0, 5000), externalLinks, previewData: { type: 'office', ext, arrayBuffer, html: typeof textContent === 'string' && textContent.includes('<') ? textContent : null } };
 }
 
 async function analyseHtml(arrayBuffer) {
@@ -512,7 +511,12 @@ async function analyseHtml(arrayBuffer) {
     findings.push({ severity: 'critical', category: 'Obfuscation', title: 'JavaScript obfuscation detected', detail: 'Patterns like eval(), unescape(), atob(), String.fromCharCode() are commonly used to hide malicious code.' });
   }
 
-  return { findings, metadata, textContent: clean.body?.textContent?.slice(0, 5000) || '', externalLinks };
+  const sanitisedHtml = DOMPurify.sanitize(html, {
+    FORBID_TAGS: ['script','iframe','object','embed','form','input','button','meta','link'],
+    FORBID_ATTR: ['onerror','onload','onclick','onmouseover','style','action','formaction'],
+    ALLOW_DATA_ATTR: false,
+  });
+  return { findings, metadata, textContent: clean.body?.textContent?.slice(0, 5000) || '', externalLinks, previewData: { type: 'html', sanitisedHtml } };
 }
 
 async function analyseCsv(arrayBuffer) {
@@ -551,7 +555,7 @@ async function analyseCsv(arrayBuffer) {
     findings.push({ severity: 'low', category: 'URLs', title: `${urls.length} URL(s) in data`, detail: urls.slice(0, 3).map(u => u[0]).join(', ') });
   }
 
-  return { findings, metadata, textContent: text.slice(0, 5000), externalLinks: [] };
+  return { findings, metadata, textContent: text.slice(0, 5000), externalLinks: [], previewData: { type: 'csv', text } };
 }
 
 async function analyseXml(arrayBuffer) {
@@ -594,7 +598,9 @@ async function analyseXml(arrayBuffer) {
     findings.push({ severity: 'high', category: 'Active Content', title: 'Script element in XML/SVG', detail: 'Script elements in SVG/XML files can execute JavaScript when opened in browsers.' });
   }
 
-  return { findings, metadata, textContent: text.slice(0, 5000), externalLinks };
+  const isSvg = /^\s*<svg/i.test(text);
+  const sanitisedSvg = isSvg ? DOMPurify.sanitize(text, { USE_PROFILES: { svg: true, svgFilters: true } }) : null;
+  return { findings, metadata, textContent: text.slice(0, 5000), externalLinks, previewData: { type: isSvg ? 'svg' : 'xml', text, sanitisedSvg } };
 }
 
 async function analyseRtf(arrayBuffer) {
@@ -625,7 +631,16 @@ async function analyseRtf(arrayBuffer) {
     findings.push({ severity: 'medium', category: 'Obfuscation', title: `${hexChunks.length} long hex-encoded block(s)`, detail: 'Large hex blobs in RTF often encode embedded objects or shellcode.' });
   }
 
-  return { findings, metadata, textContent: '', externalLinks: [] };
+  // Strip RTF control words to produce readable plain text
+  const plainText = text
+    .replace(/\{[^{}]*\}/g, '')          // remove groups
+    .replace(/\\[a-z]+\-?\d*\s?/g, ' ')  // remove control words
+    .replace(/\\\*/g, '')
+    .replace(/[{}\\]/g, '')
+    .replace(/\s{2,}/g, ' ')
+    .trim();
+
+  return { findings, metadata, textContent: '', externalLinks: [], previewData: { type: 'rtf', plainText } };
 }
 
 // ─── DISPATCH ────────────────────────────────────────────────────────────────
@@ -642,7 +657,7 @@ async function analyseFile(file) {
 
   return {
     findings: [{ severity: 'info', category: 'Format', title: 'Limited analysis for this file type', detail: `Basic metadata extraction only for .${ext} files.` }],
-    metadata: {}, textContent: '', externalLinks: []
+    metadata: {}, textContent: '', externalLinks: [], previewData: { type: 'unsupported', ext }
   };
 }
 
@@ -896,6 +911,480 @@ function LinksList({ links }) {
   );
 }
 
+// ─── FULL VIEW COMPONENT ─────────────────────────────────────────────────────
+// Opens the raw file in a sandboxed iframe using a blob URL.
+// For PDF/images this gives the browser's native renderer.
+// For Office formats (no browser renderer) we fall back to the safe HTML render.
+
+function FullView({ file, previewData }) {
+  const [blobUrl, setBlobUrl] = React.useState(null);
+  const [confirmed, setConfirmed] = React.useState(false);
+
+  React.useEffect(() => {
+    return () => { if (blobUrl) URL.revokeObjectURL(blobUrl); };
+  }, [blobUrl]);
+
+  const open = React.useCallback(() => {
+    const url = URL.createObjectURL(file);
+    setBlobUrl(url);
+    setConfirmed(true);
+  }, [file]);
+
+  const ext = file?.name.split('.').pop().toLowerCase();
+  const isPdf    = ext === 'pdf';
+  const isHtml   = ['html','htm'].includes(ext);
+  const isSvg    = ext === 'svg';
+  const isCsv    = ext === 'csv';
+  const isXml    = ext === 'xml';
+  // Formats the browser can natively render in an iframe
+  const nativeRenderable = isPdf || isHtml || isSvg;
+
+  const warningStyle = {
+    background: 'rgba(239,68,68,0.08)',
+    border: '1px solid var(--risk-high)',
+    borderRadius: 6,
+    padding: '16px 20px',
+    marginBottom: 16,
+  };
+
+  if (!confirmed) {
+    return (
+      <div>
+        <div style={warningStyle}>
+          <div style={{ display: 'flex', gap: 10, alignItems: 'flex-start', marginBottom: 12 }}>
+            <AlertTriangle size={16} color="var(--risk-high)" style={{ flexShrink: 0, marginTop: 2 }} />
+            <div>
+              <p style={{ fontSize: 13, fontWeight: 600, color: 'var(--risk-high)', marginBottom: 6 }}>
+                Full View — unsanitised content
+              </p>
+              <p style={{ fontSize: 12, color: 'var(--text-secondary)', lineHeight: 1.7 }}>
+                {nativeRenderable
+                  ? `This renders the file as-is using your browser's native ${isPdf ? 'PDF' : 'HTML'} renderer inside a sandboxed iframe. Scripts and top-level navigation are blocked by the sandbox, but the file is otherwise unmodified.`
+                  : `This format (${ext.toUpperCase()}) cannot be natively rendered by the browser. The safe rendered view will be shown instead — use the Safe Preview tab for the same result.`
+                }
+              </p>
+              {previewData?.type === 'office' && (
+                <p style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 6, fontStyle: 'italic' }}>
+                  Office documents (DOCX, XLSX, PPTX) cannot be rendered natively in a browser. Full View uses the same HTML conversion as Safe Preview, just without the security banner.
+                </p>
+              )}
+            </div>
+          </div>
+          <div style={{ display: 'flex', gap: 8 }}>
+            <button
+              onClick={open}
+              style={{
+                background: 'var(--risk-high)', color: '#fff', border: 'none',
+                borderRadius: 4, padding: '8px 18px', cursor: 'pointer', fontSize: 13, fontWeight: 600,
+              }}
+            >
+              I understand — show full view
+            </button>
+          </div>
+        </div>
+        {/* Show the security findings as a reminder */}
+        <p style={{ fontSize: 12, color: 'var(--text-muted)', fontFamily: "'IBM Plex Mono', monospace" }}>
+          Review the Findings tab before proceeding. Check the risk level above.
+        </p>
+      </div>
+    );
+  }
+
+  // Native render: PDF, HTML, SVG
+  if (nativeRenderable && blobUrl) {
+    return (
+      <div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10, padding: '6px 12px', background: 'var(--bg-elevated)', border: '1px solid var(--border)', borderRadius: 4 }}>
+          <AlertTriangle size={13} color="var(--risk-medium)" />
+          <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>
+            Rendered natively in sandboxed iframe — scripts and navigation blocked. External resources may load.
+          </span>
+          <button onClick={() => { setConfirmed(false); URL.revokeObjectURL(blobUrl); setBlobUrl(null); }}
+            style={{ marginLeft: 'auto', fontSize: 11, color: 'var(--text-muted)', background: 'none', border: '1px solid var(--border)', borderRadius: 3, padding: '2px 8px', cursor: 'pointer' }}>
+            Close
+          </button>
+        </div>
+        <iframe
+          src={blobUrl}
+          sandbox="allow-same-origin allow-scripts"
+          title="Full document view"
+          style={{ width: '100%', minHeight: 700, border: '1px solid var(--border)', borderRadius: 4, background: '#fff', display: 'block' }}
+        />
+      </div>
+    );
+  }
+
+  // CSV/XML/RTF — just show the raw text nicely
+  if ((isCsv || isXml) && previewData) {
+    return (
+      <div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10, padding: '6px 12px', background: 'var(--bg-elevated)', border: '1px solid var(--border)', borderRadius: 4 }}>
+          <Info size={13} color="var(--accent-blue)" />
+          <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>Raw file content — displayed as text, not executed.</span>
+        </div>
+        {isCsv ? <CsvPreview text={previewData.text} /> : <XmlPreview text={previewData.text} />}
+      </div>
+    );
+  }
+
+  // Office formats and RTF — use the same safe renderer, just without the banner
+  if (previewData) {
+    return (
+      <div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10, padding: '6px 12px', background: 'var(--bg-elevated)', border: '1px solid var(--border)', borderRadius: 4 }}>
+          <Info size={13} color="var(--accent-blue)" />
+          <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>
+            {ext?.toUpperCase()} cannot be natively rendered — showing converted view.
+          </span>
+        </div>
+        <OfficePreview previewData={previewData} />
+      </div>
+    );
+  }
+
+  return null;
+}
+
+// ─── DOCUMENT PREVIEW COMPONENT ─────────────────────────────────────────────
+
+function PdfPreview({ arrayBuffer }) {
+  const canvasRefs = React.useRef({});
+  const [pages, setPages] = React.useState([]);
+  const [loading, setLoading] = React.useState(true);
+  const [error, setError] = React.useState(null);
+
+  React.useEffect(() => {
+    let cancelled = false;
+    async function render() {
+      try {
+        const pdfjs = await getPdfJs();
+        const pdf = await pdfjs.getDocument({ data: arrayBuffer.slice(0) }).promise;
+        const pageNums = Array.from({ length: Math.min(pdf.numPages, 20) }, (_, i) => i + 1);
+        setPages(pageNums);
+        setLoading(false);
+        // render each page after state update
+        for (const num of pageNums) {
+          if (cancelled) break;
+          await new Promise(resolve => setTimeout(resolve, 0)); // yield
+          const page = await pdf.getPage(num);
+          const viewport = page.getViewport({ scale: 1.4 });
+          const canvas = canvasRefs.current[num];
+          if (!canvas) { resolve?.(); continue; }
+          canvas.width = viewport.width;
+          canvas.height = viewport.height;
+          const ctx = canvas.getContext('2d');
+          await page.render({ canvasContext: ctx, viewport }).promise;
+        }
+      } catch (e) {
+        if (!cancelled) setError(e.message);
+        setLoading(false);
+      }
+    }
+    render();
+    return () => { cancelled = true; };
+  }, [arrayBuffer]);
+
+  if (loading) return <div style={{ padding: 32, textAlign: 'center', color: 'var(--text-muted)', fontFamily: "'IBM Plex Mono', monospace", fontSize: 13 }}>Rendering pages…</div>;
+  if (error) return <div style={{ padding: 16, color: 'var(--risk-high)', fontFamily: "'IBM Plex Mono', monospace", fontSize: 12 }}>Render error: {error}</div>;
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+      {pages.length > 20 && <p style={{ fontSize: 12, color: 'var(--text-muted)', textAlign: 'center' }}>Showing first 20 pages</p>}
+      {pages.map(num => (
+        <div key={num} style={{ position: 'relative' }}>
+          <div style={{ fontSize: 10, color: 'var(--text-muted)', fontFamily: "'IBM Plex Mono', monospace", marginBottom: 4 }}>Page {num}</div>
+          <canvas
+            ref={el => { if (el) canvasRefs.current[num] = el; }}
+            style={{ width: '100%', borderRadius: 4, border: '1px solid var(--border)', display: 'block', background: '#fff' }}
+          />
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function OfficePreview({ previewData }) {
+  const { ext, arrayBuffer, html } = previewData;
+  const isExcel = ['xls','xlsx','xlsm','xlsb'].includes(ext);
+  const isPpt   = ['ppt','pptx','pptm'].includes(ext);
+  const isWord  = ['doc','docx','docm'].includes(ext);
+  const [rendered, setRendered] = React.useState(null);
+
+  React.useEffect(() => {
+    async function build() {
+      try {
+        if (isWord) {
+          // mammoth already produced HTML during analysis — re-run for clean output
+          const mammoth = await getMammoth();
+          const result = await mammoth.default.convertToHtml({ arrayBuffer: arrayBuffer.slice(0) });
+          const safe = DOMPurify.sanitize(result.value, {
+            FORBID_TAGS: ['script','iframe','object','embed','form','input','button'],
+            FORBID_ATTR: ['onerror','onload','onclick','onmouseover','action'],
+            ALLOW_DATA_ATTR: false,
+          });
+          setRendered({ kind: 'html', value: safe });
+        } else if (isExcel) {
+          const workbook = XLSX.read(arrayBuffer.slice(0), { type: 'array' });
+          const sheets = workbook.SheetNames.map(name => ({
+            name,
+            html: XLSX.utils.sheet_to_html(workbook.Sheets[name], { editable: false }),
+          }));
+          setRendered({ kind: 'sheets', value: sheets });
+        } else if (isPpt) {
+          const workbook = XLSX.read(arrayBuffer.slice(0), { type: 'array' });
+          // PPTX via SheetJS gives us slide text
+          const slides = workbook.SheetNames.map((name, i) => {
+            const sheet = workbook.Sheets[name];
+            const csv = XLSX.utils.sheet_to_csv(sheet);
+            return { index: i + 1, name, text: csv };
+          });
+          setRendered({ kind: 'slides', value: slides });
+        }
+      } catch (e) {
+        setRendered({ kind: 'error', value: e.message });
+      }
+    }
+    build();
+  }, [ext, arrayBuffer]);
+
+  if (!rendered) return <div style={{ padding: 32, textAlign: 'center', color: 'var(--text-muted)', fontFamily: "'IBM Plex Mono', monospace", fontSize: 13 }}>Rendering document…</div>;
+  if (rendered.kind === 'error') return <div style={{ padding: 16, color: 'var(--risk-high)', fontFamily: "'IBM Plex Mono', monospace", fontSize: 12 }}>Render error: {rendered.value}</div>;
+
+  if (rendered.kind === 'html') {
+    return (
+      <iframe
+        sandbox="allow-same-origin"
+        srcDoc={`<!DOCTYPE html><html><head><style>
+          body { font-family: Georgia, serif; line-height: 1.7; padding: 32px 48px; color: #111; max-width: 860px; margin: 0 auto; }
+          h1,h2,h3,h4 { margin-top: 1.4em; } table { border-collapse: collapse; width: 100%; }
+          td,th { border: 1px solid #ccc; padding: 6px 10px; } img { max-width: 100%; }
+        </style></head><body>${rendered.value}</body></html>`}
+        title="Document preview"
+        style={{ width: '100%', minHeight: 600, border: 'none', borderRadius: 4, background: '#fff' }}
+      />
+    );
+  }
+
+  if (rendered.kind === 'sheets') {
+    const [activeSheet, setActiveSheet] = React.useState(0);
+    return (
+      <div>
+        <div style={{ display: 'flex', gap: 4, marginBottom: 12, flexWrap: 'wrap' }}>
+          {rendered.value.map((s, i) => (
+            <button key={i} onClick={() => setActiveSheet(i)} style={{
+              padding: '4px 12px', fontSize: 12, borderRadius: 3, cursor: 'pointer', border: '1px solid var(--border)',
+              background: activeSheet === i ? 'var(--accent-green)' : 'var(--bg-elevated)',
+              color: activeSheet === i ? '#000' : 'var(--text-secondary)',
+              fontFamily: "'IBM Plex Mono', monospace",
+            }}>{s.name}</button>
+          ))}
+        </div>
+        <iframe
+          sandbox="allow-same-origin"
+          srcDoc={`<!DOCTYPE html><html><head><style>
+            body { font-family: Arial, sans-serif; font-size: 12px; padding: 8px; margin: 0; }
+            table { border-collapse: collapse; width: max-content; } td,th { border: 1px solid #ccc; padding: 4px 8px; white-space: nowrap; }
+            tr:nth-child(even) { background: #f5f5f5; } th { background: #e0e0e0; font-weight: 600; }
+          </style></head><body>${DOMPurify.sanitize(rendered.value[activeSheet]?.html || '', { FORBID_TAGS: ['script'], ALLOW_DATA_ATTR: false })}</body></html>`}
+          title="Spreadsheet preview"
+          style={{ width: '100%', minHeight: 500, border: 'none', borderRadius: 4, background: '#fff', overflowX: 'auto' }}
+        />
+      </div>
+    );
+  }
+
+  if (rendered.kind === 'slides') {
+    return (
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+        {rendered.value.map(slide => (
+          <div key={slide.index} style={{
+            background: '#fff', borderRadius: 6, border: '1px solid var(--border)',
+            padding: '24px 32px', minHeight: 120,
+          }}>
+            <div style={{ fontSize: 10, color: '#888', fontFamily: "'IBM Plex Mono', monospace", marginBottom: 10 }}>Slide {slide.index} — {slide.name}</div>
+            <pre style={{ fontSize: 13, color: '#222', whiteSpace: 'pre-wrap', wordBreak: 'break-word', lineHeight: 1.7, margin: 0 }}>
+              {slide.text || '(No text content)'}
+            </pre>
+          </div>
+        ))}
+      </div>
+    );
+  }
+
+  return null;
+}
+
+function SheetPreviewWithState({ rendered }) {
+  const [activeSheet, setActiveSheet] = React.useState(0);
+  return (
+    <div>
+      <div style={{ display: 'flex', gap: 4, marginBottom: 12, flexWrap: 'wrap' }}>
+        {rendered.value.map((s, i) => (
+          <button key={i} onClick={() => setActiveSheet(i)} style={{
+            padding: '4px 12px', fontSize: 12, borderRadius: 3, cursor: 'pointer', border: '1px solid var(--border)',
+            background: activeSheet === i ? 'var(--accent-green)' : 'var(--bg-elevated)',
+            color: activeSheet === i ? '#000' : 'var(--text-secondary)',
+            fontFamily: "'IBM Plex Mono', monospace",
+          }}>{s.name}</button>
+        ))}
+      </div>
+      <iframe
+        sandbox="allow-same-origin"
+        srcDoc={`<!DOCTYPE html><html><head><style>
+          body { font-family: Arial, sans-serif; font-size: 12px; padding: 8px; margin: 0; }
+          table { border-collapse: collapse; width: max-content; } td,th { border: 1px solid #ccc; padding: 4px 8px; white-space: nowrap; }
+          tr:nth-child(even) { background: #f5f5f5; } th { background: #e0e0e0; font-weight: 600; }
+        </style></head><body>${DOMPurify.sanitize(rendered.value[activeSheet]?.html || '', { FORBID_TAGS: ['script'], ALLOW_DATA_ATTR: false })}</body></html>`}
+        title="Spreadsheet preview"
+        style={{ width: '100%', minHeight: 500, border: 'none', borderRadius: 4, background: '#fff' }}
+      />
+    </div>
+  );
+}
+
+function CsvPreview({ text }) {
+  const rows = React.useMemo(() => {
+    return text.trim().split('\n').slice(0, 200).map(row => {
+      // Basic CSV parse — handle quoted fields
+      const cells = [];
+      let cur = '', inQ = false;
+      for (let i = 0; i < row.length; i++) {
+        const c = row[i];
+        if (c === '"') { inQ = !inQ; continue; }
+        if (c === ',' && !inQ) { cells.push(cur); cur = ''; continue; }
+        cur += c;
+      }
+      cells.push(cur);
+      return cells;
+    });
+  }, [text]);
+
+  const headers = rows[0] || [];
+  const dataRows = rows.slice(1);
+
+  return (
+    <div style={{ overflowX: 'auto' }}>
+      {rows.length >= 200 && <p style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 8 }}>Showing first 200 rows</p>}
+      <table style={{ borderCollapse: 'collapse', fontSize: 12, fontFamily: "'IBM Plex Mono', monospace", width: '100%' }}>
+        <thead>
+          <tr>
+            {headers.map((h, i) => (
+              <th key={i} style={{ border: '1px solid var(--border)', padding: '6px 10px', background: 'var(--bg-elevated)', color: 'var(--text-primary)', textAlign: 'left', whiteSpace: 'nowrap' }}>
+                {h}
+              </th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {dataRows.map((row, ri) => (
+            <tr key={ri} style={{ background: ri % 2 === 0 ? 'var(--bg-card)' : 'var(--bg-secondary)' }}>
+              {row.map((cell, ci) => {
+                const isInjection = /^[=+\-@]/.test(cell.trim());
+                return (
+                  <td key={ci} style={{
+                    border: '1px solid var(--border)', padding: '5px 10px',
+                    color: isInjection ? 'var(--risk-high)' : 'var(--text-secondary)',
+                    whiteSpace: 'nowrap', maxWidth: 300, overflow: 'hidden', textOverflow: 'ellipsis',
+                  }} title={isInjection ? `⚠️ Possible injection: ${cell}` : cell}>
+                    {cell}
+                  </td>
+                );
+              })}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function XmlPreview({ text }) {
+  // Syntax highlight XML/SVG with simple token colouring
+  const highlighted = text
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/(&lt;\/?[a-zA-Z][a-zA-Z0-9:_-]*)/g, '<span style="color:#60a5fa">$1</span>')
+    .replace(/([a-zA-Z:_-]+=)("([^"]*)")/g, '<span style="color:#86efac">$1</span><span style="color:#fbbf24">$2</span>')
+    .replace(/(&lt;!--[\s\S]*?--&gt;)/g, '<span style="color:#6b7280;font-style:italic">$1</span>');
+
+  return (
+    <div style={{ background: '#0d1117', borderRadius: 4, padding: 16, overflowX: 'auto', maxHeight: 600, overflowY: 'auto' }}>
+      <pre style={{ margin: 0, fontSize: 12, lineHeight: 1.7, fontFamily: "'IBM Plex Mono', monospace" }}
+        dangerouslySetInnerHTML={{ __html: highlighted }} />
+    </div>
+  );
+}
+
+function SvgPreview({ sanitisedSvg }) {
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+      <div style={{
+        background: '#fff', borderRadius: 6, border: '1px solid var(--border)',
+        padding: 24, display: 'flex', justifyContent: 'center', alignItems: 'center', minHeight: 200,
+      }}>
+        <div
+          style={{ maxWidth: '100%', maxHeight: 500, overflow: 'auto' }}
+          dangerouslySetInnerHTML={{ __html: sanitisedSvg }}
+        />
+      </div>
+      <details style={{ fontSize: 12 }}>
+        <summary style={{ cursor: 'pointer', color: 'var(--text-muted)', fontFamily: "'IBM Plex Mono', monospace" }}>Source (sanitised)</summary>
+        <XmlPreview text={sanitisedSvg} />
+      </details>
+    </div>
+  );
+}
+
+function DocumentPreview({ previewData, file }) {
+  if (!previewData) return null;
+  const { type } = previewData;
+
+  const wrap = (children, notice) => (
+    <div>
+      <div style={{
+        display: 'flex', alignItems: 'center', gap: 8, marginBottom: 14,
+        padding: '8px 12px', background: 'var(--bg-elevated)',
+        border: '1px solid var(--border)', borderRadius: 4,
+      }}>
+        <Shield size={13} color="var(--accent-green)" />
+        <span style={{ fontSize: 12, color: 'var(--text-secondary)' }}>
+          {notice || 'Rendered safely — scripts and external resources are blocked.'}
+        </span>
+      </div>
+      {children}
+    </div>
+  );
+
+  if (type === 'pdf')  return wrap(<PdfPreview arrayBuffer={previewData.arrayBuffer} />);
+  if (type === 'office') return wrap(<OfficePreview previewData={previewData} />);
+  if (type === 'html') return wrap(
+    <iframe
+      sandbox="allow-same-origin"
+      srcDoc={`<!DOCTYPE html><html><head><style>body{font-family:sans-serif;line-height:1.6;padding:24px;color:#111;}</style></head><body>${previewData.sanitisedHtml}</body></html>`}
+      title="HTML preview"
+      style={{ width: '100%', minHeight: 500, border: 'none', borderRadius: 4, background: '#fff' }}
+    />,
+    'HTML rendered with scripts, forms, iframes, and external resources stripped.'
+  );
+  if (type === 'csv')  return wrap(<CsvPreview text={previewData.text} />, 'CSV displayed as table. Injection-risk cells highlighted in red.');
+  if (type === 'svg')  return wrap(<SvgPreview sanitisedSvg={previewData.sanitisedSvg} />, 'SVG rendered with scripts and event handlers removed.');
+  if (type === 'xml')  return wrap(<XmlPreview text={previewData.text} />, 'XML displayed with syntax highlighting. Not executed.');
+  if (type === 'rtf')  return wrap(
+    <div style={{ background: '#fff', borderRadius: 4, padding: '24px 32px', minHeight: 200 }}>
+      <pre style={{ fontSize: 13, color: '#222', whiteSpace: 'pre-wrap', wordBreak: 'break-word', lineHeight: 1.8, margin: 0, fontFamily: 'Georgia, serif' }}>
+        {previewData.plainText || '(No readable text extracted from RTF)'}
+      </pre>
+    </div>,
+    'RTF rendered as plain text only — binary content and control sequences stripped.'
+  );
+
+  return (
+    <div style={{ padding: 32, textAlign: 'center', color: 'var(--text-muted)' }}>
+      <FileText size={28} style={{ margin: '0 auto 10px' }} />
+      <p style={{ fontSize: 13 }}>No preview available for .{previewData.ext} files.</p>
+    </div>
+  );
+}
+
 // ─── MAIN APP ────────────────────────────────────────────────────────────────
 export default function App() {
   const [file, setFile] = useState(null);
@@ -905,6 +1394,7 @@ export default function App() {
   const [tab, setTab] = useState('findings');
   const [showPreview, setShowPreview] = useState(false);
   const [dragging, setDragging] = useState(false);
+  const [darkMode, setDarkMode] = useState(true);
 
   const processFile = useCallback(async (f) => {
     setFile(f);
@@ -949,11 +1439,12 @@ export default function App() {
     { id: 'findings', label: 'Findings', count: result?.findings.filter(f => f.severity !== 'info').length },
     { id: 'metadata', label: 'Metadata', count: result ? Object.keys(result.metadata).length : null },
     { id: 'links',    label: 'Ext. Links', count: result?.externalLinks?.length },
-    { id: 'preview',  label: 'Content Preview', count: null },
+    { id: 'preview',  label: 'Safe Preview', count: null },
+    { id: 'fullview', label: 'Full View', count: null },
   ];
 
   return (
-    <div style={{ minHeight: '100vh', background: 'var(--bg-primary)', display: 'flex', flexDirection: 'column' }}>
+    <div className={darkMode ? '' : 'light'} style={{ minHeight: '100vh', background: 'var(--bg-primary)', display: 'flex', flexDirection: 'column' }}>
 
       {/* Header */}
       <header style={{
@@ -971,11 +1462,36 @@ export default function App() {
         <span style={{ marginLeft: 8, fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: 'var(--text-muted)', borderLeft: '1px solid var(--border)', paddingLeft: 12 }}>
           Document Security Analyser
         </span>
-        <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 6 }}>
-          <span style={{ width: 6, height: 6, borderRadius: '50%', background: 'var(--accent-green)', display: 'inline-block' }} />
-          <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: 'var(--text-muted)' }}>
-            file contents stay local · usage metadata logged
+        <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 12 }}>
+          <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            <span style={{ width: 6, height: 6, borderRadius: '50%', background: 'var(--accent-green)', display: 'inline-block' }} />
+            <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: 'var(--text-muted)' }}>
+              file contents stay local · usage metadata logged
+            </span>
           </span>
+          {/* Day/night toggle */}
+          <button
+            onClick={() => setDarkMode(d => !d)}
+            title={darkMode ? 'Switch to light mode' : 'Switch to dark mode'}
+            style={{
+              background: 'var(--bg-elevated)',
+              border: '1px solid var(--border)',
+              borderRadius: 20,
+              padding: '4px 10px',
+              cursor: 'pointer',
+              display: 'flex',
+              alignItems: 'center',
+              gap: 6,
+              fontSize: 13,
+              color: 'var(--text-secondary)',
+              transition: 'background 0.2s, border-color 0.2s',
+            }}
+          >
+            {darkMode ? '☀️' : '🌙'}
+            <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10 }}>
+              {darkMode ? 'LIGHT' : 'DARK'}
+            </span>
+          </button>
         </div>
       </header>
 
@@ -1171,21 +1687,11 @@ export default function App() {
             )}
 
             {tab === 'preview' && (
-              <div>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }}>
-                  <AlertTriangle size={14} color="var(--risk-medium)" />
-                  <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>
-                    Text content extracted from the document. Not rendered — plain text only.
-                  </span>
-                </div>
-                <div style={{ background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: 6, padding: 16, maxHeight: 400, overflowY: 'auto' }}>
-                  <pre style={{ fontSize: 12, fontFamily: "'IBM Plex Mono', monospace", color: 'var(--text-secondary)', whiteSpace: 'pre-wrap', wordBreak: 'break-word', lineHeight: 1.7 }}>
-                    {result.textContent
-                      ? DOMPurify.sanitize(result.textContent, { ALLOWED_TAGS: [] })
-                      : 'No text content extracted.'}
-                  </pre>
-                </div>
-              </div>
+              <DocumentPreview previewData={result.previewData} file={file} />
+            )}
+
+            {tab === 'fullview' && (
+              <FullView file={file} previewData={result.previewData} />
             )}
           </div>
         )}

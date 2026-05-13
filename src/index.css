@@ -26,6 +26,28 @@
   --risk-critical: #ef4444;
 }
 
+.light {
+  --bg-primary: #f5f7f5;
+  --bg-secondary: #ffffff;
+  --bg-card: #eef1ee;
+  --bg-elevated: #e4e8e4;
+  --border: #d0d8d0;
+  --border-active: #a8b8a8;
+  --text-primary: #1a211a;
+  --text-secondary: #3d5a3d;
+  --text-muted: #7a9a7a;
+  --accent-green: #16a34a;
+  --accent-yellow: #d97706;
+  --accent-red: #dc2626;
+  --accent-blue: #2563eb;
+  --accent-orange: #ea580c;
+  --risk-none: #16a34a;
+  --risk-low: #15803d;
+  --risk-medium: #d97706;
+  --risk-high: #dc2626;
+  --risk-critical: #b91c1c;
+}
+
 html, body, #root {
   height: 100%;
   font-family: 'IBM Plex Sans', sans-serif;
