@@ -192,9 +192,8 @@ async function analysePdf(arrayBuffer) {
     });
   }
 
-  // Store as Uint8Array — pdfjs detaches/transfers the original ArrayBuffer during rendering
-  // so we need a copy that stays alive for the preview renderer
-  return { findings, metadata, textContent: textContent.slice(0, 5000), pageCount, externalLinks, previewData: { type: 'pdf', bytes: new Uint8Array(arrayBuffer) } };
+  // bytes will be attached by the dispatch function after analysis completes
+  return { findings, metadata, textContent: textContent.slice(0, 5000), pageCount, externalLinks, previewData: { type: 'pdf' } };
 }
 
 async function analyseOffice(arrayBuffer, ext) {
@@ -452,7 +451,8 @@ async function analyseOffice(arrayBuffer, ext) {
     findings.push({ severity: 'medium', category: 'Parse Error', title: 'Could not parse document', detail: err.message });
   }
 
-  return { findings, metadata, textContent: (typeof textContent === 'string' ? textContent : '').slice(0, 5000), externalLinks, previewData: { type: 'office', ext, bytes: new Uint8Array(arrayBuffer), html: typeof textContent === 'string' && textContent.includes('<') ? textContent : null } };
+  // bytes will be attached by the dispatch function after analysis completes
+  return { findings, metadata, textContent: (typeof textContent === 'string' ? textContent : '').slice(0, 5000), externalLinks, previewData: { type: 'office', ext, html: typeof textContent === 'string' && textContent.includes('<') ? textContent : null } };
 }
 
 async function analyseHtml(arrayBuffer) {
@@ -647,20 +647,39 @@ async function analyseRtf(arrayBuffer) {
 
 // ─── DISPATCH ────────────────────────────────────────────────────────────────
 async function analyseFile(file) {
-  const arrayBuffer = await file.arrayBuffer();
+  // Read once into a Uint8Array. We NEVER pass this directly to any library
+  // that might transfer/detach the underlying buffer (pdfjs does this).
+  // Instead every consumer gets a fresh .slice() copy.
+  const raw = new Uint8Array(await file.arrayBuffer());
   const ext = file.name.split('.').pop().toLowerCase();
 
-  if (ext === 'pdf') return analysePdf(arrayBuffer);
-  if (['doc','docx','docm','xls','xlsx','xlsm','ppt','pptx','pptm'].includes(ext)) return analyseOffice(arrayBuffer, ext);
-  if (['html','htm'].includes(ext)) return analyseHtml(arrayBuffer);
-  if (ext === 'csv') return analyseCsv(arrayBuffer);
-  if (['xml','svg'].includes(ext)) return analyseXml(arrayBuffer);
-  if (ext === 'rtf') return analyseRtf(arrayBuffer);
+  let result;
+  if (ext === 'pdf') {
+    result = await analysePdf(raw.slice(0).buffer);
+  } else if (['doc','docx','docm','xls','xlsx','xlsm','ppt','pptx','pptm'].includes(ext)) {
+    result = await analyseOffice(raw.slice(0).buffer, ext);
+  } else if (['html','htm'].includes(ext)) {
+    result = await analyseHtml(raw.slice(0).buffer);
+  } else if (ext === 'csv') {
+    result = await analyseCsv(raw.slice(0).buffer);
+  } else if (['xml','svg'].includes(ext)) {
+    result = await analyseXml(raw.slice(0).buffer);
+  } else if (ext === 'rtf') {
+    result = await analyseRtf(raw.slice(0).buffer);
+  } else {
+    return {
+      findings: [{ severity: 'info', category: 'Format', title: 'Limited analysis for this file type', detail: `Basic metadata extraction only for .${ext} files.` }],
+      metadata: {}, textContent: '', externalLinks: [], previewData: { type: 'unsupported', ext }
+    };
+  }
 
-  return {
-    findings: [{ severity: 'info', category: 'Format', title: 'Limited analysis for this file type', detail: `Basic metadata extraction only for .${ext} files.` }],
-    metadata: {}, textContent: '', externalLinks: [], previewData: { type: 'unsupported', ext }
-  };
+  // Now that analysis is done (and any internal transfers have happened),
+  // attach a guaranteed-live Uint8Array from our untouched `raw` copy.
+  if (result.previewData && (result.previewData.type === 'pdf' || result.previewData.type === 'office')) {
+    result.previewData.bytes = raw.slice(0);
+  }
+
+  return result;
 }
 
 // ─── TELEMETRY ───────────────────────────────────────────────────────────────
