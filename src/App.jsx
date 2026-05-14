@@ -946,9 +946,14 @@ function FullView({ file, previewData }) {
   }, [blobUrl]);
 
   const open = React.useCallback(() => {
-    const url = URL.createObjectURL(file);
-    setBlobUrl(url);
-    setConfirmed(true);
+    if (isPdf) {
+      // PDF.js handles rendering — no blob URL needed
+      setConfirmed(true);
+    } else {
+      const url = URL.createObjectURL(file);
+      setBlobUrl(url);
+      setConfirmed(true);
+    }
   }, [file]);
 
   const ext = file?.name.split('.').pop().toLowerCase();
@@ -957,8 +962,7 @@ function FullView({ file, previewData }) {
   const isSvg    = ext === 'svg';
   const isCsv    = ext === 'csv';
   const isXml    = ext === 'xml';
-  // Formats the browser can natively render in an iframe
-  const nativeRenderable = isPdf || isHtml || isSvg;
+  const nativeRenderable = isHtml || isSvg; // PDF now uses canvas, not iframe
 
   const warningStyle = {
     background: 'rgba(239,68,68,0.08)',
@@ -979,61 +983,66 @@ function FullView({ file, previewData }) {
                 Full View — unsanitised content
               </p>
               <p style={{ fontSize: 12, color: 'var(--text-secondary)', lineHeight: 1.7 }}>
-                {nativeRenderable
-                  ? `This renders the file as-is using your browser's native ${isPdf ? 'PDF' : 'HTML'} renderer inside a sandboxed iframe. Scripts and top-level navigation are blocked by the sandbox, but the file is otherwise unmodified.`
-                  : `This format (${ext.toUpperCase()}) cannot be natively rendered by the browser. The safe rendered view will be shown instead — use the Safe Preview tab for the same result.`
+                {isPdf
+                  ? 'Renders all pages of the PDF at full fidelity using the built-in renderer. No scripts are executed.'
+                  : nativeRenderable
+                    ? `Renders the ${ext.toUpperCase()} file with scripts and external resources allowed.`
+                    : `This format (${ext.toUpperCase()}) cannot be natively rendered. The converted view will be shown.`
                 }
               </p>
               {previewData?.type === 'office' && (
                 <p style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 6, fontStyle: 'italic' }}>
-                  Office documents (DOCX, XLSX, PPTX) cannot be rendered natively in a browser. Full View uses the same HTML conversion as Safe Preview, just without the security banner.
+                  Office documents cannot be rendered natively in a browser. Full View uses the same conversion as Safe Preview.
                 </p>
               )}
             </div>
           </div>
-          <div style={{ display: 'flex', gap: 8 }}>
-            <button
-              onClick={open}
-              style={{
-                background: 'var(--risk-high)', color: '#fff', border: 'none',
-                borderRadius: 4, padding: '8px 18px', cursor: 'pointer', fontSize: 13, fontWeight: 600,
-              }}
-            >
-              I understand — show full view
-            </button>
-          </div>
+          <button
+            onClick={open}
+            style={{
+              background: 'var(--risk-high)', color: '#fff', border: 'none',
+              borderRadius: 4, padding: '8px 18px', cursor: 'pointer', fontSize: 13, fontWeight: 600,
+            }}
+          >
+            I understand — show full view
+          </button>
         </div>
-        {/* Show the security findings as a reminder */}
         <p style={{ fontSize: 12, color: 'var(--text-muted)', fontFamily: "'IBM Plex Mono', monospace" }}>
-          Review the Findings tab before proceeding. Check the risk level above.
+          Review the Findings tab before proceeding.
         </p>
       </div>
     );
   }
 
-  // Native render: PDF, HTML, SVG
-  if (nativeRenderable && blobUrl) {
-    // PDF: scripts not needed; HTML/SVG: allow scripts + external loads (that's the point of Full View)
-    const sandboxAttr = isPdf
-      ? 'allow-same-origin'
-      : 'allow-same-origin allow-scripts allow-forms allow-popups';
+  const closebar = (label) => (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10, padding: '6px 12px', background: 'var(--bg-elevated)', border: '1px solid var(--border)', borderRadius: 4 }}>
+      <AlertTriangle size={13} color="var(--risk-medium)" />
+      <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>{label}</span>
+      <button onClick={() => { setConfirmed(false); if (blobUrl) { URL.revokeObjectURL(blobUrl); setBlobUrl(null); } }}
+        style={{ marginLeft: 'auto', fontSize: 11, color: 'var(--text-muted)', background: 'none', border: '1px solid var(--border)', borderRadius: 3, padding: '2px 8px', cursor: 'pointer' }}>
+        Close
+      </button>
+    </div>
+  );
+
+  // PDF — use canvas renderer (works in all browsers, no iframe PDF issues)
+  if (isPdf && previewData?.bytes) {
     return (
       <div>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10, padding: '6px 12px', background: 'var(--bg-elevated)', border: '1px solid var(--border)', borderRadius: 4 }}>
-          <AlertTriangle size={13} color="var(--risk-medium)" />
-          <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>
-            {isPdf
-              ? 'PDF rendered natively — scripts blocked.'
-              : 'HTML rendered with scripts and external resources allowed. Top-level navigation blocked.'}
-          </span>
-          <button onClick={() => { setConfirmed(false); URL.revokeObjectURL(blobUrl); setBlobUrl(null); }}
-            style={{ marginLeft: 'auto', fontSize: 11, color: 'var(--text-muted)', background: 'none', border: '1px solid var(--border)', borderRadius: 3, padding: '2px 8px', cursor: 'pointer' }}>
-            Close
-          </button>
-        </div>
+        {closebar('All pages rendered via PDF.js canvas — scripts are not executed.')}
+        <PdfPreviewFull bytes={previewData.bytes} />
+      </div>
+    );
+  }
+
+  // HTML/SVG — blob URL in iframe with full permissions
+  if (nativeRenderable && blobUrl) {
+    return (
+      <div>
+        {closebar(`${ext.toUpperCase()} rendered with scripts and external resources allowed. Top-level navigation blocked.`)}
         <iframe
           src={blobUrl}
-          sandbox={sandboxAttr}
+          sandbox="allow-same-origin allow-scripts allow-forms allow-popups"
           title="Full document view"
           style={{ width: '100%', minHeight: 700, border: '1px solid var(--border)', borderRadius: 4, background: '#fff', display: 'block' }}
         />
@@ -1041,29 +1050,21 @@ function FullView({ file, previewData }) {
     );
   }
 
-  // CSV/XML/RTF — just show the raw text nicely
+  // CSV/XML — raw display
   if ((isCsv || isXml) && previewData) {
     return (
       <div>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10, padding: '6px 12px', background: 'var(--bg-elevated)', border: '1px solid var(--border)', borderRadius: 4 }}>
-          <Info size={13} color="var(--accent-blue)" />
-          <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>Raw file content — displayed as text, not executed.</span>
-        </div>
+        {closebar('Raw file content — displayed as text, not executed.')}
         {isCsv ? <CsvPreview text={previewData.text} /> : <XmlPreview text={previewData.text} />}
       </div>
     );
   }
 
-  // Office formats and RTF — use the same safe renderer, just without the banner
+  // Office / RTF — same converted view
   if (previewData) {
     return (
       <div>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10, padding: '6px 12px', background: 'var(--bg-elevated)', border: '1px solid var(--border)', borderRadius: 4 }}>
-          <Info size={13} color="var(--accent-blue)" />
-          <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>
-            {ext?.toUpperCase()} cannot be natively rendered — showing converted view.
-          </span>
-        </div>
+        {closebar(`${ext?.toUpperCase()} cannot be natively rendered — showing converted view.`)}
         <OfficePreview previewData={previewData} />
       </div>
     );
@@ -1085,7 +1086,6 @@ function PdfPreview({ bytes }) {
     async function render() {
       try {
         const pdfjs = await getPdfJs();
-        // Pass a fresh copy — pdfjs transfers the buffer internally
         const pdf = await pdfjs.getDocument({ data: bytes.slice(0) }).promise;
         const pageNums = Array.from({ length: Math.min(pdf.numPages, 20) }, (_, i) => i + 1);
         setPages(pageNums);
@@ -1119,6 +1119,69 @@ function PdfPreview({ bytes }) {
       {pages.map(num => (
         <div key={num}>
           <div style={{ fontSize: 10, color: 'var(--text-muted)', fontFamily: "'IBM Plex Mono', monospace", marginBottom: 4 }}>Page {num}</div>
+          <canvas
+            ref={el => { if (el) canvasRefs.current[num] = el; }}
+            style={{ width: '100%', borderRadius: 4, border: '1px solid var(--border)', display: 'block', background: '#fff' }}
+          />
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// Full PDF renderer — no page cap, slightly higher scale
+function PdfPreviewFull({ bytes }) {
+  const canvasRefs = React.useRef({});
+  const [pages, setPages] = React.useState([]);
+  const [loading, setLoading] = React.useState(true);
+  const [rendered, setRendered] = React.useState(0);
+  const [error, setError] = React.useState(null);
+
+  React.useEffect(() => {
+    let cancelled = false;
+    async function render() {
+      try {
+        const pdfjs = await getPdfJs();
+        const pdf = await pdfjs.getDocument({ data: bytes.slice(0) }).promise;
+        const pageNums = Array.from({ length: pdf.numPages }, (_, i) => i + 1);
+        setPages(pageNums);
+        setLoading(false);
+        for (const num of pageNums) {
+          if (cancelled) break;
+          await new Promise(resolve => setTimeout(resolve, 0));
+          const page = await pdf.getPage(num);
+          const viewport = page.getViewport({ scale: 1.6 });
+          const canvas = canvasRefs.current[num];
+          if (!canvas) continue;
+          canvas.width = viewport.width;
+          canvas.height = viewport.height;
+          const ctx = canvas.getContext('2d');
+          await page.render({ canvasContext: ctx, viewport }).promise;
+          if (!cancelled) setRendered(n => n + 1);
+        }
+      } catch (e) {
+        if (!cancelled) { setError(e.message); setLoading(false); }
+      }
+    }
+    render();
+    return () => { cancelled = true; };
+  }, [bytes]);
+
+  if (loading) return <div style={{ padding: 32, textAlign: 'center', color: 'var(--text-muted)', fontFamily: "'IBM Plex Mono', monospace", fontSize: 13 }}>Loading PDF…</div>;
+  if (error) return <div style={{ padding: 16, color: 'var(--risk-high)', fontFamily: "'IBM Plex Mono', monospace", fontSize: 12 }}>Render error: {error}</div>;
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+      {rendered < pages.length && (
+        <div style={{ fontSize: 12, color: 'var(--text-muted)', fontFamily: "'IBM Plex Mono', monospace", textAlign: 'center' }}>
+          Rendering page {rendered} of {pages.length}…
+        </div>
+      )}
+      {pages.map(num => (
+        <div key={num}>
+          <div style={{ fontSize: 10, color: 'var(--text-muted)', fontFamily: "'IBM Plex Mono', monospace", marginBottom: 4 }}>
+            Page {num} of {pages.length}
+          </div>
           <canvas
             ref={el => { if (el) canvasRefs.current[num] = el; }}
             style={{ width: '100%', borderRadius: 4, border: '1px solid var(--border)', display: 'block', background: '#fff' }}
@@ -1397,7 +1460,16 @@ export default function App() {
   const [tab, setTab] = useState('findings');
   const [showPreview, setShowPreview] = useState(false);
   const [dragging, setDragging] = useState(false);
-  const [darkMode, setDarkMode] = useState(true);
+  const [darkMode, setDarkMode] = useState(() => {
+    const saved = localStorage.getItem('docscan-theme');
+    return saved ? saved === 'dark' : true; // default dark
+  });
+
+  const toggleDarkMode = () => setDarkMode(d => {
+    const next = !d;
+    localStorage.setItem('docscan-theme', next ? 'dark' : 'light');
+    return next;
+  });
 
   const processFile = useCallback(async (f) => {
     setFile(f);
@@ -1452,42 +1524,37 @@ export default function App() {
       {/* Header */}
       <header style={{
         borderBottom: '1px solid var(--border)',
-        padding: '16px 32px',
+        padding: '12px 16px',
         display: 'flex',
         alignItems: 'center',
-        gap: 12,
+        gap: 10,
         background: 'var(--bg-secondary)',
+        flexWrap: 'nowrap',
       }}>
-        <Shield size={20} color="var(--accent-green)" />
-        <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 15, fontWeight: 600, color: 'var(--text-primary)', letterSpacing: '0.02em' }}>
+        <Shield size={18} color="var(--accent-green)" style={{ flexShrink: 0 }} />
+        <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 15, fontWeight: 600, color: 'var(--text-primary)', letterSpacing: '0.02em', flexShrink: 0 }}>
           DOC<span style={{ color: 'var(--accent-green)' }}>SCAN</span>
         </span>
-        <span style={{ marginLeft: 8, fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: 'var(--text-muted)', borderLeft: '1px solid var(--border)', paddingLeft: 12 }}>
+        {/* Hide subtitle on narrow screens via inline media-like trick: use a span that collapses */}
+        <span className="header-subtitle" style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: 'var(--text-muted)', borderLeft: '1px solid var(--border)', paddingLeft: 10, overflow: 'hidden', whiteSpace: 'nowrap', textOverflow: 'ellipsis', minWidth: 0 }}>
           Document Security Analyser
         </span>
-        <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 12 }}>
-          <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-            <span style={{ width: 6, height: 6, borderRadius: '50%', background: 'var(--accent-green)', display: 'inline-block' }} />
-            <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: 'var(--text-muted)' }}>
-              file contents stay local · usage metadata logged
-            </span>
-          </span>
-          {/* Day/night toggle */}
+        <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
           <button
-            onClick={() => setDarkMode(d => !d)}
+            onClick={toggleDarkMode}
             title={darkMode ? 'Switch to light mode' : 'Switch to dark mode'}
             style={{
               background: 'var(--bg-elevated)',
               border: '1px solid var(--border)',
               borderRadius: 20,
-              padding: '4px 10px',
+              padding: '6px 12px',
               cursor: 'pointer',
               display: 'flex',
               alignItems: 'center',
-              gap: 6,
+              gap: 5,
               fontSize: 13,
               color: 'var(--text-secondary)',
-              transition: 'background 0.2s, border-color 0.2s',
+              whiteSpace: 'nowrap',
             }}
           >
             {darkMode ? '☀️' : '🌙'}
@@ -1498,7 +1565,7 @@ export default function App() {
         </div>
       </header>
 
-      <div style={{ flex: 1, maxWidth: 900, margin: '0 auto', width: '100%', padding: '32px 24px' }}>
+      <div style={{ flex: 1, maxWidth: 900, margin: '0 auto', width: '100%', padding: '16px 12px' }}>
 
         {/* Drop zone */}
         <div
@@ -1508,24 +1575,24 @@ export default function App() {
           style={{
             border: `2px dashed ${dragging ? 'var(--accent-green)' : 'var(--border-active)'}`,
             borderRadius: 6,
-            padding: '40px 24px',
+            padding: '24px 16px',
             textAlign: 'center',
             background: dragging ? 'rgba(74,222,128,0.04)' : 'var(--bg-secondary)',
             transition: 'all 0.2s',
             cursor: 'pointer',
-            marginBottom: 32,
+            marginBottom: 16,
           }}
         >
-          <Upload size={32} color={dragging ? 'var(--accent-green)' : 'var(--text-muted)'} style={{ margin: '0 auto 12px' }} />
+          <Upload size={28} color={dragging ? 'var(--accent-green)' : 'var(--text-muted)'} style={{ margin: '0 auto 10px' }} />
           <p style={{ fontSize: 15, color: 'var(--text-primary)', marginBottom: 6, fontWeight: 500 }}>
-            Drop a document here, or{' '}
-            <label style={{ color: 'var(--accent-green)', cursor: 'pointer', textDecoration: 'underline' }}>
-              browse
+            <label style={{ color: 'var(--accent-green)', cursor: 'pointer' }}>
+              Tap to select a file
               <input type="file" accept={ACCEPT_EXTENSIONS} onChange={onFileChange} style={{ display: 'none' }} />
             </label>
+            <span style={{ color: 'var(--text-muted)', fontSize: 13 }}> or drop here</span>
           </p>
-          <p style={{ fontSize: 12, color: 'var(--text-muted)', fontFamily: "'IBM Plex Mono', monospace" }}>
-            PDF · DOCX · XLSX · PPTX · HTML · CSV · XML · SVG · RTF · DOC · XLS · PPT
+          <p style={{ fontSize: 11, color: 'var(--text-muted)', fontFamily: "'IBM Plex Mono', monospace", lineHeight: 1.8 }}>
+            PDF · DOCX · XLSX · PPTX<br />HTML · CSV · XML · SVG · RTF
           </p>
         </div>
 
@@ -1555,76 +1622,82 @@ export default function App() {
               background: 'var(--bg-elevated)',
               border: `1px solid var(--border)`,
               borderRadius: 6,
-              padding: '16px 20px',
-              marginBottom: 24,
-              display: 'flex',
-              alignItems: 'center',
-              gap: 16,
-              flexWrap: 'wrap',
+              padding: '12px 16px',
+              marginBottom: 16,
             }}>
-              <div>
-                <div style={{ fontSize: 11, color: 'var(--text-muted)', fontFamily: "'IBM Plex Mono', monospace", marginBottom: 4, textTransform: 'uppercase', letterSpacing: '0.05em' }}>Risk Level</div>
+              {/* Top row: risk badge + filename */}
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 10, flexWrap: 'wrap' }}>
                 <RiskBadge level={risk} />
+                <span style={{ fontSize: 13, color: 'var(--text-primary)', fontFamily: "'IBM Plex Mono', monospace", wordBreak: 'break-all', flex: 1, minWidth: 0 }}>
+                  {file?.name}
+                </span>
+                {/* New file button */}
+                <label style={{
+                  fontSize: 11, color: 'var(--accent-green)', cursor: 'pointer',
+                  border: '1px solid var(--accent-green)', borderRadius: 3,
+                  padding: '3px 8px', whiteSpace: 'nowrap', flexShrink: 0,
+                  fontFamily: "'IBM Plex Mono', monospace",
+                }}>
+                  ↑ New file
+                  <input type="file" accept={ACCEPT_EXTENSIONS} onChange={onFileChange} style={{ display: 'none' }} />
+                </label>
               </div>
-              <div style={{ borderLeft: '1px solid var(--border)', paddingLeft: 16 }}>
-                <div style={{ fontSize: 11, color: 'var(--text-muted)', fontFamily: "'IBM Plex Mono', monospace", marginBottom: 4, textTransform: 'uppercase', letterSpacing: '0.05em' }}>File</div>
-                <div style={{ fontSize: 13, color: 'var(--text-primary)', fontFamily: "'IBM Plex Mono', monospace" }}>{file?.name}</div>
-              </div>
-              <div style={{ borderLeft: '1px solid var(--border)', paddingLeft: 16 }}>
-                <div style={{ fontSize: 11, color: 'var(--text-muted)', fontFamily: "'IBM Plex Mono', monospace", marginBottom: 4, textTransform: 'uppercase', letterSpacing: '0.05em' }}>Size</div>
-                <div style={{ fontSize: 13, color: 'var(--text-primary)', fontFamily: "'IBM Plex Mono', monospace" }}>
+              {/* Second row: size, pages, finding counts */}
+              <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', alignItems: 'center' }}>
+                <span style={{ fontSize: 11, color: 'var(--text-muted)', fontFamily: "'IBM Plex Mono', monospace" }}>
                   {file?.size < 1024 ? `${file.size} B` : file?.size < 1048576 ? `${(file.size/1024).toFixed(1)} KB` : `${(file.size/1048576).toFixed(2)} MB`}
+                </span>
+                {result.pageCount && (
+                  <span style={{ fontSize: 11, color: 'var(--text-muted)', fontFamily: "'IBM Plex Mono', monospace" }}>
+                    {result.pageCount} pages
+                  </span>
+                )}
+                <div style={{ display: 'flex', gap: 8, marginLeft: 'auto' }}>
+                  {[
+                    { count: criticalFindings.length, color: 'var(--risk-critical)', label: 'CRIT' },
+                    { count: highFindings.length,     color: 'var(--risk-high)',     label: 'HIGH' },
+                    { count: medFindings.length,      color: 'var(--risk-medium)',   label: 'MED'  },
+                    { count: lowFindings.length,      color: 'var(--risk-low)',      label: 'LOW'  },
+                  ].map(({ count, color, label }) => count > 0 && (
+                    <div key={label} style={{ textAlign: 'center' }}>
+                      <div style={{ fontSize: 17, fontWeight: 700, color, fontFamily: "'IBM Plex Mono', monospace", lineHeight: 1 }}>{count}</div>
+                      <div style={{ fontSize: 9, color: 'var(--text-muted)', fontFamily: "'IBM Plex Mono', monospace", letterSpacing: '0.05em' }}>{label}</div>
+                    </div>
+                  ))}
                 </div>
-              </div>
-              {result.pageCount && (
-                <div style={{ borderLeft: '1px solid var(--border)', paddingLeft: 16 }}>
-                  <div style={{ fontSize: 11, color: 'var(--text-muted)', fontFamily: "'IBM Plex Mono', monospace", marginBottom: 4, textTransform: 'uppercase', letterSpacing: '0.05em' }}>Pages</div>
-                  <div style={{ fontSize: 13, color: 'var(--text-primary)', fontFamily: "'IBM Plex Mono', monospace" }}>{result.pageCount}</div>
-                </div>
-              )}
-              <div style={{ marginLeft: 'auto', display: 'flex', gap: 12, flexWrap: 'wrap' }}>
-                {[
-                  { count: criticalFindings.length, color: 'var(--risk-critical)', label: 'CRITICAL' },
-                  { count: highFindings.length,     color: 'var(--risk-high)',     label: 'HIGH' },
-                  { count: medFindings.length,      color: 'var(--risk-medium)',   label: 'MED' },
-                  { count: lowFindings.length,      color: 'var(--risk-low)',      label: 'LOW' },
-                ].map(({ count, color, label }) => count > 0 && (
-                  <div key={label} style={{ textAlign: 'center' }}>
-                    <div style={{ fontSize: 20, fontWeight: 700, color, fontFamily: "'IBM Plex Mono', monospace", lineHeight: 1 }}>{count}</div>
-                    <div style={{ fontSize: 10, color: 'var(--text-muted)', fontFamily: "'IBM Plex Mono', monospace", letterSpacing: '0.05em' }}>{label}</div>
-                  </div>
-                ))}
               </div>
             </div>
 
-            {/* Tabs */}
-            <div style={{ display: 'flex', gap: 0, borderBottom: '1px solid var(--border)', marginBottom: 20 }}>
-              {tabs.map(t => (
-                <button
-                  key={t.id}
-                  onClick={() => setTab(t.id)}
-                  style={{
-                    background: 'none', border: 'none', cursor: 'pointer',
-                    padding: '10px 18px',
-                    fontSize: 13, fontWeight: 500,
-                    color: tab === t.id ? 'var(--accent-green)' : 'var(--text-muted)',
-                    borderBottom: tab === t.id ? '2px solid var(--accent-green)' : '2px solid transparent',
-                    marginBottom: -1,
-                    display: 'flex', alignItems: 'center', gap: 6,
-                    transition: 'color 0.15s',
-                  }}
-                >
-                  {t.label}
-                  {t.count > 0 && (
-                    <span style={{
-                      background: tab === t.id ? 'var(--accent-green)' : 'var(--bg-elevated)',
-                      color: tab === t.id ? '#000' : 'var(--text-muted)',
-                      borderRadius: 10, padding: '1px 7px', fontSize: 11,
-                      fontFamily: "'IBM Plex Mono', monospace"
-                    }}>{t.count}</span>
-                  )}
-                </button>
-              ))}
+            {/* Tabs — horizontally scrollable on mobile */}
+            <div style={{ overflowX: 'auto', borderBottom: '1px solid var(--border)', marginBottom: 16, WebkitOverflowScrolling: 'touch' }}>
+              <div style={{ display: 'flex', gap: 0, minWidth: 'max-content' }}>
+                {tabs.map(t => (
+                  <button
+                    key={t.id}
+                    onClick={() => setTab(t.id)}
+                    style={{
+                      background: 'none', border: 'none', cursor: 'pointer',
+                      padding: '10px 14px',
+                      fontSize: 12, fontWeight: 500,
+                      color: tab === t.id ? 'var(--accent-green)' : 'var(--text-muted)',
+                      borderBottom: tab === t.id ? '2px solid var(--accent-green)' : '2px solid transparent',
+                      marginBottom: -1,
+                      display: 'flex', alignItems: 'center', gap: 5,
+                      whiteSpace: 'nowrap',
+                    }}
+                  >
+                    {t.label}
+                    {t.count > 0 && (
+                      <span style={{
+                        background: tab === t.id ? 'var(--accent-green)' : 'var(--bg-elevated)',
+                        color: tab === t.id ? '#000' : 'var(--text-muted)',
+                        borderRadius: 10, padding: '1px 6px', fontSize: 10,
+                        fontFamily: "'IBM Plex Mono', monospace"
+                      }}>{t.count}</span>
+                    )}
+                  </button>
+                ))}
+              </div>
             </div>
 
             {/* Tab content */}
@@ -1772,12 +1845,12 @@ export default function App() {
       </div>
 
       {/* Footer */}
-      <footer style={{ borderTop: '1px solid var(--border)', padding: '14px 32px', textAlign: 'center' }}>
-        <p style={{ fontSize: 12, color: 'var(--text-muted)', fontFamily: "'IBM Plex Mono', monospace", marginBottom: 4 }}>
-          File contents are analysed locally in your browser and are never uploaded to any server.
+      <footer style={{ borderTop: '1px solid var(--border)', padding: '10px 16px', textAlign: 'center' }}>
+        <p style={{ fontSize: 11, color: 'var(--text-muted)', fontFamily: "'IBM Plex Mono', monospace", marginBottom: 2 }}>
+          File contents are analysed locally — never uploaded.
         </p>
-        <p style={{ fontSize: 11, color: 'var(--text-muted)', fontFamily: "'IBM Plex Mono', monospace" }}>
-          Usage metadata (IP, filename, file type, device &amp; browser info, risk result) is logged for monitoring. No file content is included.
+        <p style={{ fontSize: 10, color: 'var(--text-muted)', fontFamily: "'IBM Plex Mono', monospace" }}>
+          Usage metadata (IP, filename, type, device, risk result) is logged for monitoring.
         </p>
       </footer>
     </div>

@@ -48,7 +48,15 @@
   --risk-critical: #b91c1c;
 }
 
-html, body, #root {
+@media (max-width: 520px) {
+  .header-subtitle { display: none; }
+}
+
+/* Metadata table: stack key/value on very small screens */
+@media (max-width: 420px) {
+  .meta-row { flex-direction: column !important; }
+  .meta-key { width: 100% !important; padding-bottom: 2px !important; }
+}
   height: 100%;
   font-family: 'IBM Plex Sans', sans-serif;
   background: var(--bg-primary);
