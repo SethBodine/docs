@@ -10,13 +10,17 @@
   },
   "dependencies": {
     "dompurify": "^3.4.2",
+    "fflate": "^0.8.2",
+    "jszip": "^3.10.1",
     "lucide-react": "^0.263.1",
     "mammoth": "^1.8.0",
     "papaparse": "^5.4.1",
     "pdfjs-dist": "^4.4.168",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
-    "xlsx": "^0.18.5"
+    "seek-bzip": "^2.0.0",
+    "xlsx": "^0.18.5",
+    "xz-decompress": "^0.2.3"
   },
   "devDependencies": {
     "@vitejs/plugin-react": "^4.3.1",

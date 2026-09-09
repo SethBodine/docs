@@ -2,9 +2,15 @@ import React, { useState, useCallback } from 'react';
 import {
   Upload, Shield, FileText, AlertTriangle, CheckCircle,
   XCircle, Info, ChevronDown, ChevronRight, Eye, EyeOff,
-  Link, User, Clock, Hash, Layers, Code
+  Link, User, Clock, Hash, Layers, Code, Archive, Folder, Globe
 } from 'lucide-react';import DOMPurify from 'dompurify';
 import * as XLSX from 'xlsx';
+import { sniffMagic, KIND_TO_EXPECTED_EXTS } from './lib/magic.js';
+import { scanForSecrets } from './lib/secrets.js';
+import { extractOneLayer, isArchiveKind, newBudget, ARCHIVE_LIMITS } from './lib/archive.js';
+import { analyseHar } from './lib/har.js';
+import { analyseConfigFile, analysePemOrKey, isConfigExt, isPemExt, isSshKeyFilename } from './lib/configFiles.js';
+import JSZip from 'jszip';
 
 // ─── PDF.js (lazy loaded to avoid SSR issues) ───────────────────────────────
 let pdfjsLib = null;
@@ -44,7 +50,10 @@ const SUPPORTED_TYPES = {
   'text/rtf': { label: 'RTF', ext: 'rtf', category: 'document' },
 };
 
-const ACCEPT_EXTENSIONS = '.pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.html,.htm,.csv,.xml,.svg,.rtf';
+const ACCEPT_EXTENSIONS = '.pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.html,.htm,.csv,.xml,.svg,.rtf,' +
+  '.har,.jar,.zip,.tar,.gz,.tgz,.bz2,.tbz2,.xz,.txz,' +
+  '.env,.ini,.cfg,.conf,.config,.properties,.toml,.yaml,.yml,.json,.tf,.tfvars,.tfstate,' +
+  '.pem,.key,.crt,.cer,.csr,.exe,.dll,.sys,.scr,.elf,.so';
 
 // ─── Risk helpers ────────────────────────────────────────────────────────────
 function riskLevel(findings) {
@@ -347,7 +356,6 @@ async function analyseOffice(arrayBuffer, ext) {
 
     // Raw ZIP inspection for embedded objects and relationships (works for all OOXML)
     try {
-      const { default: JSZip } = await import('https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js');
       const zip = await JSZip.loadAsync(arrayBuffer);
 
       // Check for OLE objects
@@ -646,32 +654,251 @@ async function analyseRtf(arrayBuffer) {
 }
 
 // ─── DISPATCH ────────────────────────────────────────────────────────────────
+// ─── ARCHIVE / BINARY SUPPORT (Phase 1 additions) ───────────────────────────
+// Everything below feeds into analyseBytes(), the recursive dispatcher that
+// replaced the old flat extension-only analyseFile(). See lib/archive.js for
+// the extraction engine and its resource-exhaustion limits, and
+// lib/secrets.js for the shared credential detector every branch below uses.
+
+function analyseJarManifest(children) {
+  const findings = [];
+  const manifest = children.find(c => c.name === 'META-INF/MANIFEST.MF');
+  if (manifest) {
+    const text = new TextDecoder('utf-8', { fatal: false }).decode(manifest.bytes);
+    const mainClass = text.match(/Main-Class:\s*(.+)/i);
+    if (mainClass) {
+      findings.push({ severity: 'info', category: 'Java', title: 'JAR entry point', detail: `Main-Class: ${mainClass[1].trim()}` });
+    }
+  } else {
+    findings.push({ severity: 'low', category: 'Java', title: 'No META-INF/MANIFEST.MF found', detail: 'Unusual for a standard JAR — may be a partial archive, a fat/shaded JAR variant, or non-standard build output.' });
+  }
+  const classFiles = children.filter(c => c.name.endsWith('.class'));
+  if (classFiles.length > 0) {
+    findings.push({ severity: 'info', category: 'Java', title: `${classFiles.length} compiled .class file(s)`, detail: 'Bytecode is never decompiled or executed — only textual resources (.properties, .xml, .yml, .json, MANIFEST.MF) are scanned for embedded secrets.' });
+  }
+  const sigFiles = children.filter(c => /META-INF\/.*\.(SF|RSA|DSA)$/i.test(c.name));
+  if (sigFiles.length > 0) {
+    findings.push({ severity: 'info', category: 'Java', title: 'JAR is code-signed', detail: sigFiles.map(f => f.name).join(', ') });
+  }
+  return findings;
+}
+
+async function analyseArchiveContainer(raw, filename, kind, depth, budget) {
+  const findings = [];
+  const metadata = { 'Archive Type': kind.toUpperCase() };
+
+  if (depth >= ARCHIVE_LIMITS.MAX_RECURSION_DEPTH) {
+    findings.push({
+      severity: 'medium', category: 'Archive',
+      title: 'Maximum nesting depth reached',
+      detail: `Archives nested more than ${ARCHIVE_LIMITS.MAX_RECURSION_DEPTH} levels deep are not expanded further, to prevent nested-archive resource-exhaustion attacks.`,
+    });
+    return { findings, metadata, textContent: '', externalLinks: [], previewData: { type: 'archive', kind, children: [] } };
+  }
+
+  const { children = [], error } = await extractOneLayer(kind, raw, filename, budget);
+  metadata['Extracted Files'] = String(children.length);
+
+  if (error) {
+    findings.push({ severity: 'low', category: 'Archive', title: 'Archive could not be fully processed', detail: error });
+  }
+
+  const isJar = filename.toLowerCase().endsWith('.jar') && kind === 'zip';
+  if (isJar) {
+    metadata['Archive Type'] = 'JAR (Java Archive)';
+    findings.push(...analyseJarManifest(children));
+  }
+
+  const childSummaries = [];
+  for (const child of children) {
+    const childRes = await analyseBytes(child.bytes, child.name, depth + 1, budget);
+    const childRisk = riskLevel(childRes.findings.filter(f => f.severity !== 'info'));
+    childSummaries.push({ name: child.name, risk: childRisk, findings: childRes.findings });
+
+    // Bubble non-info findings up into the parent's findings list, tagged with
+    // their path, so nested secrets surface in the main Findings tab too —
+    // not just buried in a per-child expandable view.
+    for (const f of childRes.findings) {
+      if (f.severity === 'info') continue;
+      findings.push({ ...f, detail: `[in ${child.name}] ${f.detail || ''}`.trim() });
+    }
+  }
+
+  for (const note of budget.truncationNotes) {
+    findings.push({ severity: 'low', category: 'Archive Limits', title: 'Archive processing was capped', detail: note });
+  }
+  budget.truncationNotes = []; // reported once, at the level they occurred
+
+  if (children.length === 0 && !error) {
+    findings.push({ severity: 'info', category: 'Archive', title: 'Empty or unreadable archive', detail: 'No extractable entries were found.' });
+  }
+
+  return {
+    findings,
+    metadata,
+    textContent: '',
+    externalLinks: [],
+    previewData: { type: 'archive', kind, children: childSummaries },
+  };
+}
+
+function extractAsciiStrings(bytes, minLen = 6, maxStrings = 20000) {
+  const strings = [];
+  let cur = '';
+  for (let i = 0; i < bytes.length; i++) {
+    const b = bytes[i];
+    if (b >= 32 && b < 127) {
+      cur += String.fromCharCode(b);
+    } else {
+      if (cur.length >= minLen) strings.push(cur);
+      cur = '';
+      if (strings.length >= maxStrings) break;
+    }
+  }
+  if (cur.length >= minLen) strings.push(cur);
+  return strings;
+}
+
+function analyseBinaryStrings(raw, filename, kindLabel) {
+  const findings = [];
+  const metadata = { 'Detected Format': kindLabel, 'File Size': `${(raw.length / 1024).toFixed(1)} KB` };
+  const strings = extractAsciiStrings(raw);
+  const blob = strings.join('\n');
+
+  findings.push(...scanForSecrets(blob, filename));
+
+  const suspiciousPatterns = [
+    { re: /powershell(\.exe)?|cmd\.exe|rundll32|regsvr32|mshta|certutil|bitsadmin|wscript|cscript/gi, label: 'Living-off-the-land binary reference', severity: 'medium' },
+    { re: /VirtualAllocEx|WriteProcessMemory|CreateRemoteThread|SetWindowsHookEx|LoadLibrary[AW]?|GetProcAddress/g, label: 'Process injection / dynamic-loading API import string', severity: 'medium' },
+    { re: /LD_PRELOAD|LD_LIBRARY_PATH/g, label: 'Linker environment variable (potential hijack vector)', severity: 'medium' },
+    { re: /https?:\/\/[^\s"'<>]{4,}/g, label: 'URL string', severity: 'low' },
+    { re: /\\\\[a-z0-9._-]+\\[^\s"'<>]*/gi, label: 'UNC network path', severity: 'low' },
+  ];
+  for (const { re, label, severity } of suspiciousPatterns) {
+    const matches = [...new Set(blob.match(re) || [])];
+    if (matches.length > 0) {
+      findings.push({ severity, category: 'Binary Strings', title: `${label} found`, detail: matches.slice(0, 6).join(' | ') });
+    }
+  }
+
+  findings.push({
+    severity: 'info', category: 'Format',
+    title: 'Static string scan only — this file was never executed',
+    detail: 'Full binary structure parsing (PE/ELF headers, import/section tables, packed-section entropy) is a Phase 2 addition. This pass only extracts printable strings and runs the shared secret detector against them.',
+  });
+
+  const urls = [...new Set(blob.match(/https?:\/\/[^\s"'<>]{4,}/g) || [])];
+  return {
+    findings,
+    metadata,
+    textContent: '',
+    externalLinks: urls.map(u => ({ url: u, context: 'Binary string' })),
+    previewData: { type: 'unsupported', ext: filename.split('.').pop() },
+  };
+}
+
+/**
+ * Core recursive dispatcher. Used both for the top-level uploaded file and for
+ * every file pulled out of an archive. `depth` and `budget` are only non-zero
+ * for archive children — see lib/archive.js for what the budget enforces.
+ */
+async function analyseBytes(raw, filename, depth = 0, budget = newBudget()) {
+  const ext = filename.includes('.') ? filename.split('.').pop().toLowerCase() : '';
+  const magic = sniffMagic(raw);
+
+  // Extension can't be trusted — compare it against the actual file signature
+  // and surface a finding when they disagree (this is how a renamed .exe or a
+  // ZIP masquerading as a .txt gets caught).
+  let mismatchFinding = null;
+  const officeExts = ['doc', 'docx', 'docm', 'xls', 'xlsx', 'xlsm', 'ppt', 'pptx', 'pptm', 'jar'];
+  if (magic && !officeExts.includes(ext)) {
+    const expectedExts = KIND_TO_EXPECTED_EXTS[magic.kind] || [];
+    if (expectedExts.length > 0 && !expectedExts.includes(ext)) {
+      mismatchFinding = {
+        severity: 'high', category: 'Format Spoofing',
+        title: 'File content does not match its extension',
+        detail: `"${filename}" has extension .${ext || '(none)'} but its actual content signature identifies it as: ${magic.label}.`,
+      };
+    }
+  }
+
+  let result;
+
+  if (['doc', 'docx', 'docm', 'xls', 'xlsx', 'xlsm', 'ppt', 'pptx', 'pptm'].includes(ext)) {
+    result = await analyseOffice(raw.slice(0).buffer, ext);
+  } else if (ext === 'jar' || (magic?.kind === 'zip' && ext === 'jar')) {
+    result = await analyseArchiveContainer(raw, filename, 'zip', depth, budget);
+  } else if (magic && isArchiveKind(magic.kind)) {
+    result = await analyseArchiveContainer(raw, filename, magic.kind, depth, budget);
+  } else if (magic?.kind === 'pe') {
+    result = analyseBinaryStrings(raw, filename, magic.label);
+  } else if (magic?.kind === 'elf') {
+    result = analyseBinaryStrings(raw, filename, magic.label);
+  } else if (magic?.kind === 'macho') {
+    result = analyseBinaryStrings(raw, filename, magic.label);
+  } else if (magic?.kind === 'pcap' || magic?.kind === 'pcapng') {
+    result = analysePcapStrings(raw, filename, magic.label);
+  } else if (ext === 'har') {
+    result = await analyseHar(raw.slice(0).buffer);
+  } else if (ext === 'pdf') {
+    result = await analysePdf(raw.slice(0).buffer);
+  } else if (['html', 'htm'].includes(ext)) {
+    result = await analyseHtml(raw.slice(0).buffer);
+  } else if (ext === 'csv') {
+    result = await analyseCsv(raw.slice(0).buffer);
+  } else if (['xml', 'svg'].includes(ext)) {
+    result = await analyseXml(raw.slice(0).buffer);
+  } else if (ext === 'rtf') {
+    result = await analyseRtf(raw.slice(0).buffer);
+  } else if (isPemExt(ext) || isSshKeyFilename(filename)) {
+    result = await analysePemOrKey(raw.slice(0).buffer, filename);
+  } else if (isConfigExt(ext) || /^(credentials|config)$/i.test(filename.split('/').pop())) {
+    result = await analyseConfigFile(raw.slice(0).buffer, filename);
+  } else {
+    // Generic fallback — no dedicated analyser, but still run the shared
+    // secret scanner against any decodable text content (covers source code
+    // and anything else with credential-shaped strings) instead of a bare
+    // "not supported" message.
+    let text = '';
+    try { text = new TextDecoder('utf-8', { fatal: true }).decode(raw); } catch { /* binary, leave blank */ }
+    const genericFindings = text ? scanForSecrets(text, filename) : [];
+    if (genericFindings.length === 0) {
+      genericFindings.push({ severity: 'info', category: 'Format', title: 'Limited analysis for this file type', detail: `Basic ${text ? 'text secret-scan' : 'metadata'} only for .${ext || '(no extension)'} files.` });
+    }
+    result = {
+      findings: genericFindings, metadata: {}, textContent: text.slice(0, 5000),
+      externalLinks: [...text.matchAll(/https?:\/\/[^\s"'<>]{4,}/g)].map(m => ({ url: m[0], context: 'File content' })).slice(0, 30),
+      previewData: text ? { type: 'xml', text: text.slice(0, 20000) } : { type: 'unsupported', ext },
+    };
+  }
+
+  if (mismatchFinding) {
+    result.findings = [mismatchFinding, ...result.findings];
+  }
+
+  return result;
+}
+
 async function analyseFile(file) {
   // Read once into a Uint8Array. We NEVER pass this directly to any library
   // that might transfer/detach the underlying buffer (pdfjs does this).
   // Instead every consumer gets a fresh .slice() copy.
   const raw = new Uint8Array(await file.arrayBuffer());
-  const ext = file.name.split('.').pop().toLowerCase();
 
-  let result;
-  if (ext === 'pdf') {
-    result = await analysePdf(raw.slice(0).buffer);
-  } else if (['doc','docx','docm','xls','xlsx','xlsm','ppt','pptx','pptm'].includes(ext)) {
-    result = await analyseOffice(raw.slice(0).buffer, ext);
-  } else if (['html','htm'].includes(ext)) {
-    result = await analyseHtml(raw.slice(0).buffer);
-  } else if (ext === 'csv') {
-    result = await analyseCsv(raw.slice(0).buffer);
-  } else if (['xml','svg'].includes(ext)) {
-    result = await analyseXml(raw.slice(0).buffer);
-  } else if (ext === 'rtf') {
-    result = await analyseRtf(raw.slice(0).buffer);
-  } else {
+  if (raw.length > ARCHIVE_LIMITS.MAX_UPLOAD_BYTES) {
     return {
-      findings: [{ severity: 'info', category: 'Format', title: 'Limited analysis for this file type', detail: `Basic metadata extraction only for .${ext} files.` }],
-      metadata: {}, textContent: '', externalLinks: [], previewData: { type: 'unsupported', ext }
+      findings: [{
+        severity: 'high', category: 'Format',
+        title: 'File exceeds the maximum supported size',
+        detail: `This tool analyses files up to ${ARCHIVE_LIMITS.MAX_UPLOAD_BYTES / 1024 / 1024}MB in the browser. Larger files aren't scanned, to avoid exhausting the browser tab's memory.`,
+      }],
+      metadata: {}, textContent: '', externalLinks: [],
+      previewData: { type: 'unsupported', ext: file.name.split('.').pop() },
     };
   }
+
+  const budget = newBudget();
+  const result = await analyseBytes(raw, file.name, 0, budget);
 
   // Now that analysis is done (and any internal transfers have happened),
   // attach a guaranteed-live Uint8Array from our untouched `raw` copy.
@@ -760,7 +987,7 @@ function detectMismatch(file) {
   return { ext, mime, mismatch, note: '' };
 }
 
-async function sendTelemetry(file, riskLevelStr) {
+async function sendTelemetry(file, riskLevelStr, findings = []) {
   if (!DISCORD_WEBHOOK_URL) return;
   try {
     const ua = navigator.userAgent;
@@ -771,6 +998,14 @@ async function sendTelemetry(file, riskLevelStr) {
     } catch { /* silent */ }
 
     const { ext, mime, mismatch, note } = detectMismatch(file);
+
+    // Finding categories/counts only — never the matched value itself.
+    // scanForSecrets() already redacts values before they ever reach a finding,
+    // so this is safe to summarise as-is.
+    const nonInfo = findings.filter(f => f.severity !== 'info');
+    const categoryCounts = {};
+    for (const f of nonInfo) categoryCounts[f.category] = (categoryCounts[f.category] || 0) + 1;
+    const categorySummary = Object.entries(categoryCounts).map(([c, n]) => `${c} (${n})`).join(', ') || 'None';
 
     // Build the file type field — combine extension + MIME, flag mismatch clearly
     const fileTypeValue = mismatch
@@ -797,6 +1032,8 @@ async function sendTelemetry(file, riskLevelStr) {
         { name: '⚠️ Risk Level',    value: riskLevelStr.toUpperCase(),          inline: true  },
         { name: '📦 File Size',     value: sizeLabel,                           inline: true  },
         { name: '📄 Filename',      value: file.name,                           inline: false },
+        { name: '📊 Findings',      value: String(nonInfo.length),              inline: true  },
+        { name: '🔎 Categories',    value: categorySummary.length > 1000 ? categorySummary.slice(0, 1000) + '…' : categorySummary, inline: false },
         { name: '🏷️ Extension',     value: `.${ext}`,                           inline: true  },
         { name: '🔍 Actual MIME',   value: mime || 'not reported',              inline: true  },
         { name: '✅ Type Match',    value: mismatch ? '❌ NO — possible spoofing' : (note || '✅ Yes'), inline: true },
@@ -930,6 +1167,113 @@ function LinksList({ links }) {
       {links.length > 30 && <p style={{ fontSize: 12, color: 'var(--text-muted)' }}>…and {links.length - 30} more</p>}
     </div>
   );
+}
+
+function ArchiveChildRow({ child }) {
+  const [open, setOpen] = useState(false);
+  const nonInfo = child.findings.filter(f => f.severity !== 'info');
+  return (
+    <div style={{ border: '1px solid var(--border)', borderRadius: 4, background: 'var(--bg-card)', overflow: 'hidden' }}>
+      <button
+        onClick={() => setOpen(o => !o)}
+        style={{ width: '100%', textAlign: 'left', background: 'none', border: 'none', padding: '10px 14px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 10 }}
+      >
+        <Folder size={13} color="var(--text-muted)" style={{ flexShrink: 0 }} />
+        <span style={{ flex: 1, fontSize: 12, fontFamily: "'IBM Plex Mono', monospace", color: 'var(--text-primary)', wordBreak: 'break-all' }}>{child.name}</span>
+        <RiskBadge level={child.risk} />
+        {open ? <ChevronDown size={14} color="var(--text-muted)" /> : <ChevronRight size={14} color="var(--text-muted)" />}
+      </button>
+      {open && (
+        <div style={{ padding: '0 14px 12px 14px', display: 'flex', flexDirection: 'column', gap: 6 }}>
+          {nonInfo.length === 0
+            ? <p style={{ fontSize: 12, color: 'var(--text-muted)' }}>No findings for this entry.</p>
+            : nonInfo.map((f, i) => <FindingCard key={i} finding={f} />)}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ArchiveContents({ children }) {
+  if (!children || children.length === 0) {
+    return <p style={{ color: 'var(--text-muted)', fontSize: 13 }}>No extractable entries in this archive.</p>;
+  }
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+      {children.map((c, i) => <ArchiveChildRow key={i} child={c} />)}
+    </div>
+  );
+}
+
+function HarPreview({ entries }) {
+  if (!entries || entries.length === 0) {
+    return <p style={{ color: 'var(--text-muted)', fontSize: 13 }}>No requests found in this HAR file.</p>;
+  }
+  const statusColor = (status) => {
+    if (!status) return 'var(--text-muted)';
+    if (status >= 500) return 'var(--risk-critical)';
+    if (status >= 400) return 'var(--risk-high)';
+    if (status >= 300) return 'var(--risk-medium)';
+    return 'var(--accent-green)';
+  };
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 4, maxHeight: 600, overflowY: 'auto' }}>
+      {entries.map((e, i) => (
+        <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '6px 10px', background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: 3, fontFamily: "'IBM Plex Mono', monospace", fontSize: 11 }}>
+          <span style={{ color: 'var(--accent-blue)', width: 48, flexShrink: 0 }}>{e.method}</span>
+          <span style={{ color: statusColor(e.status), width: 36, flexShrink: 0 }}>{e.status || '—'}</span>
+          <span style={{ color: 'var(--text-secondary)', wordBreak: 'break-all', flex: 1 }}>{e.url}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function analysePcapStrings(raw, filename, magicLabel) {
+  const findings = [];
+  const PCAP_SCAN_CAP = 50 * 1024 * 1024; // 50MB — bounded string scan, not full packet reassembly
+  const scanned = raw.length > PCAP_SCAN_CAP ? raw.slice(0, PCAP_SCAN_CAP) : raw;
+  const metadata = {
+    'Detected Format': magicLabel,
+    'File Size': `${(raw.length / 1024 / 1024).toFixed(1)} MB`,
+    'Scan Coverage': raw.length > PCAP_SCAN_CAP ? `First ${PCAP_SCAN_CAP / 1024 / 1024}MB of ${(raw.length / 1024 / 1024).toFixed(1)}MB` : 'Full file',
+  };
+
+  const strings = extractAsciiStrings(scanned, 6);
+  const blob = strings.join('\n');
+
+  // Shared secret detector catches Bearer/Basic auth headers, JWTs, API keys,
+  // connection strings, etc. that happen to survive as contiguous ASCII in the
+  // raw capture bytes (works for plaintext protocols: HTTP, FTP, Telnet, POP3,
+  // IMAP, SMTP — anything sent unencrypted).
+  findings.push(...scanForSecrets(blob, filename));
+
+  const patterns = [
+    { re: /USER\s+\S+|PASS\s+\S+/g, label: 'FTP/Telnet USER/PASS command', severity: 'high' },
+    { re: /https?:\/\/[^\s"'<>]{4,}/g, label: 'URL', severity: 'low' },
+    { re: /\b(?:\d{1,3}\.){3}\d{1,3}\b/g, label: 'IPv4 address', severity: 'info' },
+    { re: /Host:\s*[^\s\r\n]+/gi, label: 'HTTP Host header', severity: 'info' },
+    { re: /community\s*=\s*\S+/gi, label: 'SNMP community string', severity: 'high' },
+  ];
+  for (const { re, label, severity } of patterns) {
+    const matches = [...new Set(blob.match(re) || [])];
+    if (matches.length > 0) {
+      findings.push({ severity, category: 'Packet Capture', title: `${label} found in capture`, detail: matches.slice(0, 8).join(' | ') + (matches.length > 8 ? ` (+${matches.length - 8} more)` : '') });
+    }
+  }
+
+  findings.push({
+    severity: 'info', category: 'Format',
+    title: 'Bounded string/credential scan only — no packet or stream reconstruction',
+    detail: 'This pass extracts printable strings from the raw capture bytes and runs the shared secret detector against them. TLS SNI, JA3/JA4 fingerprinting, stream reassembly, and full protocol decoding are a separate, heavier phase.',
+  });
+
+  const urls = [...new Set(blob.match(/https?:\/\/[^\s"'<>]{4,}/g) || [])];
+  return {
+    findings, metadata, textContent: '',
+    externalLinks: urls.map(u => ({ url: u, context: 'Packet capture string' })),
+    previewData: { type: 'unsupported', ext: filename.split('.').pop() },
+  };
 }
 
 // ─── FULL VIEW COMPONENT ─────────────────────────────────────────────────────
@@ -1442,6 +1786,14 @@ function DocumentPreview({ previewData, file }) {
     </div>,
     'RTF rendered as plain text only — binary content and control sequences stripped.'
   );
+  if (type === 'har') return wrap(
+    <HarPreview entries={previewData.entries} />,
+    'Requests listed for context — full headers, cookies, and bodies are scanned but not rendered here.'
+  );
+  if (type === 'archive') return wrap(
+    <ArchiveContents children={previewData.children} />,
+    `${previewData.kind?.toUpperCase()} contents — each child file was recursively analysed. Expand a row to see its findings.`
+  );
 
   return (
     <div style={{ padding: 32, textAlign: 'center', color: 'var(--text-muted)' }}>
@@ -1483,7 +1835,7 @@ export default function App() {
       setResult(res);
       // Fire telemetry after analysis — no file content is included
       const risk = riskLevel(res.findings.filter(fi => fi.severity !== 'info'));
-      sendTelemetry(f, risk);
+      sendTelemetry(f, risk, res.findings);
     } catch (e) {
       setError(e.message);
     } finally {
@@ -1592,7 +1944,9 @@ export default function App() {
             <span style={{ color: 'var(--text-muted)', fontSize: 13 }}> or drop here</span>
           </p>
           <p style={{ fontSize: 11, color: 'var(--text-muted)', fontFamily: "'IBM Plex Mono', monospace", lineHeight: 1.8 }}>
-            PDF · DOCX · XLSX · PPTX<br />HTML · CSV · XML · SVG · RTF
+            PDF · DOCX · XLSX · PPTX · HTML · CSV · XML · SVG · RTF<br />
+            HAR · JAR · ZIP/TAR/GZIP/BZIP2/XZ · ENV/YAML/TOML/INI<br />
+            PEM/KEY/CRT · AWS/GCP/Azure/K8s configs · EXE/ELF (strings)
           </p>
         </div>
 
