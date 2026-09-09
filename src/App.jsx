@@ -10,6 +10,9 @@ import { scanForSecrets } from './lib/secrets.js';
 import { extractOneLayer, isArchiveKind, newBudget, ARCHIVE_LIMITS } from './lib/archive.js';
 import { analyseHar } from './lib/har.js';
 import { analyseConfigFile, analysePemOrKey, isConfigExt, isPemExt, isSshKeyFilename } from './lib/configFiles.js';
+import { parsePe } from './lib/peParser.js';
+import { parseElf } from './lib/elfParser.js';
+import { entropyLabel } from './lib/entropy.js';
 import JSZip from 'jszip';
 
 // ─── PDF.js (lazy loaded to avoid SSR issues) ───────────────────────────────
@@ -784,7 +787,7 @@ function analyseBinaryStrings(raw, filename, kindLabel) {
   findings.push({
     severity: 'info', category: 'Format',
     title: 'Static string scan only — this file was never executed',
-    detail: 'Full binary structure parsing (PE/ELF headers, import/section tables, packed-section entropy) is a Phase 2 addition. This pass only extracts printable strings and runs the shared secret detector against them.',
+    detail: 'This format does not yet have a dedicated structural parser (PE and ELF do — see the header/section/import findings above for those). This pass only extracts printable strings and runs the shared secret detector against them.',
   });
 
   const urls = [...new Set(blob.match(/https?:\/\/[^\s"'<>]{4,}/g) || [])];
@@ -792,6 +795,169 @@ function analyseBinaryStrings(raw, filename, kindLabel) {
     findings,
     metadata,
     textContent: '',
+    externalLinks: urls.map(u => ({ url: u, context: 'Binary string' })),
+    previewData: { type: 'unsupported', ext: filename.split('.').pop() },
+  };
+}
+
+// ─── PE / ELF STRUCTURAL ANALYSIS (Phase 2) ─────────────────────────────────
+const PE_SUSPICIOUS_API_GROUPS = [
+  { label: 'Process injection', severity: 'high', apis: ['VirtualAllocEx', 'WriteProcessMemory', 'CreateRemoteThread', 'NtCreateThreadEx', 'RtlCreateUserThread', 'QueueUserAPC', 'SetThreadContext', 'NtUnmapViewOfSection'] },
+  { label: 'Anti-debugging / anti-analysis', severity: 'medium', apis: ['IsDebuggerPresent', 'CheckRemoteDebuggerPresent', 'NtQueryInformationProcess', 'OutputDebugStringA', 'OutputDebugStringW'] },
+  { label: 'Persistence (registry/services)', severity: 'medium', apis: ['RegSetValueExA', 'RegSetValueExW', 'RegCreateKeyExA', 'RegCreateKeyExW', 'CreateServiceA', 'CreateServiceW'] },
+  { label: 'Network / potential C2', severity: 'medium', apis: ['InternetOpenA', 'InternetOpenW', 'InternetConnectA', 'InternetConnectW', 'HttpSendRequestA', 'HttpSendRequestW', 'URLDownloadToFileA', 'URLDownloadToFileW', 'WinHttpOpen', 'WSAStartup'] },
+  { label: 'Credential access', severity: 'high', apis: ['CryptUnprotectData', 'LsaRetrievePrivateData', 'SamIConnect', 'SamIGetPrivateData'] },
+  { label: 'Keylogging / input capture', severity: 'high', apis: ['GetAsyncKeyState', 'GetKeyState', 'SetWindowsHookExA', 'SetWindowsHookExW'] },
+  { label: 'Dynamic API resolution', severity: 'low', apis: ['LoadLibraryA', 'LoadLibraryW', 'LoadLibraryExA', 'LoadLibraryExW', 'GetProcAddress'] },
+];
+
+const ELF_SUSPICIOUS_SYMBOL_GROUPS = [
+  { label: 'Shell/process execution', severity: 'high', symbols: ['system', 'popen', 'execve', 'execl', 'execlp', 'execvp', 'fork'] },
+  { label: 'Anti-debugging / process tracing', severity: 'medium', symbols: ['ptrace'] },
+  { label: 'Memory protection changes (shellcode-adjacent)', severity: 'medium', symbols: ['mprotect', 'mmap'] },
+  { label: 'Privilege manipulation', severity: 'high', symbols: ['setuid', 'setgid', 'seteuid', 'setegid', 'capset'] },
+  { label: 'Dynamic library loading', severity: 'low', symbols: ['dlopen', 'dlsym'] },
+  { label: 'Network', severity: 'low', symbols: ['socket', 'connect', 'bind', 'recv', 'send'] },
+  { label: 'Anti-forensics', severity: 'medium', symbols: ['unlink', 'remove'] },
+];
+
+function findingsForSuspiciousApis(importedNames, groups) {
+  const findings = [];
+  const nameSet = new Set(importedNames);
+  for (const group of groups) {
+    const hit = group.apis ? group.apis.filter(a => nameSet.has(a)) : group.symbols.filter(s => nameSet.has(s));
+    if (hit.length > 0) {
+      findings.push({
+        severity: group.severity, category: 'Binary Imports',
+        title: `${group.label} API(s) imported`,
+        detail: `${hit.join(', ')} — common in legitimate software too; this is a signal to weigh alongside everything else in this report, not a verdict.`,
+      });
+    }
+  }
+  return findings;
+}
+
+function analysePeFile(raw, filename) {
+  const findings = [];
+  const metadata = { 'File Size': `${(raw.length / 1024).toFixed(1)} KB` };
+  let pe;
+  try {
+    pe = parsePe(raw);
+  } catch (e) {
+    findings.push({ severity: 'low', category: 'Format', title: 'PE structural parsing failed — falling back to string scan only', detail: e.message });
+    const fallback = analyseBinaryStrings(raw, filename, 'Windows PE executable/library');
+    return { ...fallback, findings: [...findings, ...fallback.findings] };
+  }
+
+  metadata['Machine'] = pe.machine;
+  metadata['Type'] = pe.isDll ? 'DLL' : 'Executable';
+  metadata['Format'] = pe.isPE32Plus ? 'PE32+ (64-bit)' : 'PE32 (32-bit)';
+  metadata['Subsystem'] = pe.subsystem;
+  metadata['Entry Point'] = pe.entryPoint !== null ? '0x' + pe.entryPoint.toString(16) : 'Unknown';
+  metadata['Image Base'] = pe.imageBase || 'Unknown';
+  metadata['Compiled'] = pe.compiledAt || 'Unknown';
+  metadata['Sections'] = String(pe.sections.length);
+  metadata['Imported DLLs'] = String(pe.imports.length);
+
+  if (pe.aslr === false) findings.push({ severity: 'low', category: 'Binary Hardening', title: 'ASLR not enabled', detail: 'DllCharacteristics does not set IMAGE_DLLCHARACTERISTICS_DYNAMIC_BASE. Reduces exploit mitigation, but very common in older or unmodified toolchain output.' });
+  if (pe.nxCompat === false) findings.push({ severity: 'low', category: 'Binary Hardening', title: 'DEP/NX not marked compatible', detail: 'DllCharacteristics does not set IMAGE_DLLCHARACTERISTICS_NX_COMPAT.' });
+
+  for (const s of pe.sections) {
+    if (s.entropy === null) continue;
+    const { label, severity } = entropyLabel(s.entropy);
+    if (severity !== 'info') {
+      findings.push({ severity, category: 'Binary Sections', title: `Section "${s.name}" entropy: ${s.entropy.toFixed(2)} bits/byte — ${label}`, detail: `Raw size ${s.sizeOfRawData} bytes. High entropy alone doesn't confirm packing — normal compressed resources (icons, images) also read high.` });
+    }
+  }
+  if (pe.sections.length > 0 && pe.sections.length <= 3) {
+    findings.push({ severity: 'low', category: 'Binary Sections', title: `Unusually few sections (${pe.sections.length})`, detail: 'Legitimate compiled binaries typically have 4+ sections (.text, .data, .rdata, .reloc, etc.). Very few sections can indicate a packer, though some minimal/embedded toolchains also produce this.' });
+  }
+
+  const allImportedApis = pe.imports.flatMap(i => i.functions);
+  findings.push(...findingsForSuspiciousApis(allImportedApis, PE_SUSPICIOUS_API_GROUPS));
+
+  if (pe.imports.length === 0) {
+    findings.push({ severity: 'medium', category: 'Binary Imports', title: 'No import table found', detail: 'Statically-linked, manually mapped, or packed binaries commonly have no readable import table — this is a signal worth combining with the section-entropy findings above, not a standalone red flag.' });
+  } else {
+    metadata['DLL Dependencies'] = pe.imports.map(i => i.dll).join(', ');
+  }
+
+  if (pe.warnings.length > 0) {
+    findings.push({ severity: 'low', category: 'Format', title: 'PE parsing completed with warnings', detail: pe.warnings.join(' | ') });
+  }
+
+  // Layer the Phase 1 string/secret scan on top — structural parsing and
+  // string scanning catch different things.
+  const strings = extractAsciiStrings(raw);
+  const blob = strings.join('\n');
+  findings.push(...scanForSecrets(blob, filename));
+  const lolbins = [...new Set((blob.match(/powershell(\.exe)?|cmd\.exe|rundll32|regsvr32|mshta|certutil|bitsadmin|wscript|cscript/gi) || []))];
+  if (lolbins.length > 0) findings.push({ severity: 'medium', category: 'Binary Strings', title: 'Living-off-the-land binary reference found', detail: lolbins.slice(0, 6).join(' | ') });
+  const urls = [...new Set(blob.match(/https?:\/\/[^\s"'<>]{4,}/g) || [])];
+
+  findings.push({ severity: 'info', category: 'Format', title: 'Static structural analysis only — this file was never executed', detail: 'Headers, sections, and the import table were parsed statically. No code was run.' });
+
+  return {
+    findings, metadata, textContent: '',
+    externalLinks: urls.map(u => ({ url: u, context: 'Binary string' })),
+    previewData: { type: 'unsupported', ext: filename.split('.').pop() },
+  };
+}
+
+function analyseElfFile(raw, filename) {
+  const findings = [];
+  const metadata = { 'File Size': `${(raw.length / 1024).toFixed(1)} KB` };
+  let elf;
+  try {
+    elf = parseElf(raw);
+  } catch (e) {
+    findings.push({ severity: 'low', category: 'Format', title: 'ELF structural parsing failed — falling back to string scan only', detail: e.message });
+    const fallback = analyseBinaryStrings(raw, filename, 'ELF binary (Linux/Unix)');
+    return { ...fallback, findings: [...findings, ...fallback.findings] };
+  }
+
+  metadata['Class'] = elf.class;
+  metadata['Endianness'] = elf.endianness;
+  metadata['Type'] = elf.type;
+  metadata['Machine'] = elf.machine;
+  metadata['Entry Point'] = elf.entryPoint;
+  metadata['Linking'] = elf.isStatic ? 'Statically linked' : 'Dynamically linked';
+  if (elf.interpreter) metadata['Interpreter'] = elf.interpreter;
+  metadata['Sections'] = String(elf.sections.length);
+  metadata['Linked Libraries'] = elf.neededLibraries.length ? elf.neededLibraries.join(', ') : 'None declared';
+
+  if (elf.rpath) findings.push({ severity: 'medium', category: 'Binary Hardening', title: 'RPATH set', detail: `RPATH=${elf.rpath} — a hardcoded library search path can be a library-hijacking vector if writable/predictable.` });
+  if (elf.runpath) findings.push({ severity: 'low', category: 'Binary Hardening', title: 'RUNPATH set', detail: `RUNPATH=${elf.runpath}` });
+
+  for (const s of elf.sections) {
+    if (s.entropy === null) continue;
+    const { label, severity } = entropyLabel(s.entropy);
+    if (severity !== 'info') {
+      findings.push({ severity, category: 'Binary Sections', title: `Section "${s.name}" entropy: ${s.entropy.toFixed(2)} bits/byte — ${label}`, detail: `Size ${s.size} bytes. High entropy alone doesn't confirm packing.` });
+    }
+  }
+
+  findings.push(...findingsForSuspiciousApis(elf.importedSymbols, ELF_SUSPICIOUS_SYMBOL_GROUPS));
+
+  if (elf.isStatic) {
+    findings.push({ severity: 'low', category: 'Format', title: 'Statically linked binary', detail: 'No dynamic linker interpreter found — imported-symbol analysis (which relies on the dynamic symbol table) does not apply here.' });
+  }
+
+  if (elf.warnings.length > 0) {
+    findings.push({ severity: 'low', category: 'Format', title: 'ELF parsing completed with warnings', detail: elf.warnings.join(' | ') });
+  }
+
+  const strings = extractAsciiStrings(raw);
+  const blob = strings.join('\n');
+  findings.push(...scanForSecrets(blob, filename));
+  const envVars = [...new Set(blob.match(/LD_PRELOAD|LD_LIBRARY_PATH/g) || [])];
+  if (envVars.length > 0) findings.push({ severity: 'medium', category: 'Binary Strings', title: 'Linker environment variable referenced', detail: envVars.join(', ') + ' — a potential hijack vector if this binary reads it from an untrusted environment.' });
+  const urls = [...new Set(blob.match(/https?:\/\/[^\s"'<>]{4,}/g) || [])];
+
+  findings.push({ severity: 'info', category: 'Format', title: 'Static structural analysis only — this file was never executed', detail: 'Headers, sections, and the dynamic symbol table were parsed statically. No code was run.' });
+
+  return {
+    findings, metadata, textContent: '',
     externalLinks: urls.map(u => ({ url: u, context: 'Binary string' })),
     previewData: { type: 'unsupported', ext: filename.split('.').pop() },
   };
@@ -831,9 +997,9 @@ async function analyseBytes(raw, filename, depth = 0, budget = newBudget()) {
   } else if (magic && isArchiveKind(magic.kind)) {
     result = await analyseArchiveContainer(raw, filename, magic.kind, depth, budget);
   } else if (magic?.kind === 'pe') {
-    result = analyseBinaryStrings(raw, filename, magic.label);
+    result = analysePeFile(raw, filename);
   } else if (magic?.kind === 'elf') {
-    result = analyseBinaryStrings(raw, filename, magic.label);
+    result = analyseElfFile(raw, filename);
   } else if (magic?.kind === 'macho') {
     result = analyseBinaryStrings(raw, filename, magic.label);
   } else if (magic?.kind === 'pcap' || magic?.kind === 'pcapng') {

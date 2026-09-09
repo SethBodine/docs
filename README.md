@@ -19,7 +19,9 @@ A fully client-side document security analyser that runs entirely in the browser
 | ZIP / TAR / GZIP / BZIP2 / XZ (incl. .tgz/.tar.gz/.tbz2/.tar.bz2/.txz/.tar.xz) | Recursive extraction and scanning of every nested file, up to 5 levels deep, with hard resource-exhaustion limits (see below) |
 | .env / .ini / .cfg / .conf / .properties / .toml / .yaml / .yml / .json | Shared secret scan + format-specific checks (Kubernetes kubeconfig, Docker registry auth, Terraform state, GCP service-account keys) |
 | PEM / KEY / CRT / CER / CSR / SSH keys | Private-key/certificate block classification, always-critical private-key detection |
-| EXE / DLL / SYS / ELF / Mach-O | Magic-byte identification + printable-string extraction + secret scan + suspicious API/LOLBin string flags (no execution, no full header/import parsing yet) |
+| EXE / DLL / SYS | Full PE32/PE32+ structural parsing: machine type, subsystem, compile timestamp, entry point, ASLR/DEP flags, per-section entropy (packing signal), full import table (DLL + function names) with suspicious-API classification (process injection, anti-debugging, persistence, credential access, keylogging, C2-adjacent networking) — plus the shared string/secret scan layered on top |
+| ELF (Linux/Unix binaries, any/no extension) | Full ELF header + section/program header parsing: class/endianness/machine/entry point, static vs. dynamic linking, interpreter path, `DT_NEEDED`/`RPATH`/`RUNPATH`, per-section entropy, dynamic symbol table (imported library functions) with the same suspicious-category classification — plus the shared string/secret scan |
+| Mach-O (macOS) | Magic-byte identification + printable-string scan (no dedicated structural parser yet) |
 | PCAP / PCAPNG | Magic-byte identification + bounded printable-string scan for plaintext credentials (FTP/Telnet USER/PASS, SNMP community strings, HTTP Host headers, IPs, URLs) — not full packet/stream reconstruction |
 | Any other file | Falls back to a generic secret scan against decodable text content instead of a bare "unsupported" message |
 
@@ -40,7 +42,11 @@ Opening archives is the biggest new attack surface a static analyser can take on
 
 Archive entries with a path-traversal pattern (`../`, absolute paths) are detected and skipped rather than extracted — including cases where the underlying ZIP library normalizes the path internally before exposing it, by checking the archive's raw pre-normalization entry name. Nothing extracted from an archive is ever written to disk; everything stays in memory for the life of the analysis. GZIP and XZ streams are decompressed incrementally so a bomb is caught and aborted mid-stream rather than after the fact; BZIP2 uses a byte-bounded output sink for the same reason.
 
-**Not yet implemented:** 7-Zip and RAR archives are detected (and reported as such) but not extracted. Full PCAP protocol/stream reconstruction (TLS SNI, JA3/JA4, DNS analysis) and full PE/ELF binary structure parsing (import tables, section entropy) are planned for a later phase — see the in-app findings for a file when a deeper analysis pass would apply.
+**Not yet implemented:** 7-Zip and RAR archives are detected (and reported as such) but not extracted. Full PCAP protocol/stream reconstruction (TLS SNI, JA3/JA4, DNS analysis) is planned for a later phase. Mach-O binaries get string/secret scanning only, not the structural parsing PE and ELF now have.
+
+All binary parsing (PE/ELF) is defensive by design — it's reading untrusted, potentially malformed or deliberately hostile files. Every read is bounds-checked, every walk (sections, imports, symbols) is capped, and a parse failure degrades to the string/secret-scan fallback with a note rather than crashing the analysis. Verified against real production binaries (`/bin/ls`, `/bin/bash`, real PE executables) as well as deliberately truncated and corrupted inputs.
+
+Suspicious-API findings (process injection, anti-debugging, persistence, credential access, keylogging for PE; shell execution, ptrace, privilege manipulation for ELF) are reported as **signals to weigh, not verdicts** — legitimate software imports these routinely (e.g. `bash` genuinely calls `execve`/`fork`; that's not a compromise indicator by itself). No malware-family identification or scoring is attempted.
 
 ## Security Checks
 
