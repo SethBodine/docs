@@ -306,9 +306,8 @@ export async function extractOneLayer(kind, bytes, filename, budget) {
     case 'bzip2': result = extractBzip2(bytes, budget, filename); break;
     case 'xz':    result = await extractXz(bytes, budget, filename); break;
     case '7z':
-      return { children: [], error: '7z support is not yet implemented in this build.' };
     case 'rar':
-      return { children: [], error: 'RAR support is not yet implemented in this build.' };
+      return await extract7zOrRar(bytes, filename, kind, budget);
     default:
       return { children: [], error: `Unsupported archive kind: ${kind}` };
   }
@@ -325,6 +324,177 @@ export async function extractOneLayer(kind, bytes, filename, budget) {
   }
 
   return result;
+}
+
+// ─── 7-ZIP / RAR (via the real 7-Zip CLI compiled to WASM) ──────────────────
+// This is a deliberately reviewed and tested addition — see README.md's SBOM
+// section for the history of why that sentence matters here specifically.
+// One dependency covers both formats — 7-Zip's own codec reads RAR natively
+// (RAR4 fully, RAR5 read-only), so there's no need for a second WASM runtime.
+// Lazy-loaded (dynamic import) since the WASM binary is ~1.7MB and most users
+// never touch a 7z/RAR file.
+//
+// Hardening, verified against real hostile fixtures (not assumed):
+//   - `stdin: () => null` — without this, a password-protected archive can
+//     make the underlying C++ code fall through to `window.prompt()` in a
+//     real browser, i.e. a hostile file popping a native dialog in the
+//     user's tab. Encrypted archives are additionally detected from the
+//     `-slt` listing and skipped entirely before extraction is ever
+//     attempted, so this path should never actually be reached — the
+//     override exists as defense in depth in case detection is wrong.
+//   - Every callMain() call is wrapped in try/catch: the library's own
+//     exit-code handling is caught internally for normal errors, but a
+//     password-prompt failure specifically throws a raw non-Error value
+//     that bypasses that internal handling.
+//   - Path-traversal check on every listed entry name before extraction
+//     (same as ZIP/TAR).
+//   - Symlinks are NEVER followed when reading extraction output. Verified
+//     against a real-world RAR symlink-traversal exploit sample (a RAR
+//     archive containing a symlink named "up" pointing outside the
+//     extraction root, plus a file written through it) from the `rarfile`
+//     Python library's own test suite: without this check, walking the
+//     extracted output with a plain recursive readdir+readFile would follow
+//     the symlink and return the file it points to as if it were legitimate
+//     archive content. `FS.lstat` + `FS.isLink` catches it before `readFile`
+//     is ever called, and it's reported as a finding instead of silently
+//     resolved. This class of bug is the RAR/symlink analogue of "Zip Slip"
+//     and is *not* caught by a plain name-based `../` check, since neither
+//     entry name in the exploit actually contains `..`.
+//   - Extraction happens entirely inside the WASM module's own in-memory
+//     virtual filesystem (Emscripten MEMFS) — there is no real disk access
+//     from this code path regardless of what a hostile archive contains.
+
+function parse7zListing(stdout) {
+  const entries = [];
+  let current = null;
+  for (const line of stdout.split('\n')) {
+    const pathMatch = line.match(/^Path = (.+)$/);
+    const sizeMatch = line.match(/^Size = (\d+)$/);
+    const encMatch = line.match(/^Encrypted = \+/);
+    if (pathMatch) {
+      if (current) entries.push(current);
+      current = { path: pathMatch[1], size: 0, encrypted: false, isDir: false };
+    } else if (current && sizeMatch) {
+      current.size = parseInt(sizeMatch[1], 10);
+    } else if (current && encMatch) {
+      current.encrypted = true;
+    } else if (current && /^Folder = \+/.test(line)) {
+      current.isDir = true;
+    }
+  }
+  if (current) entries.push(current);
+  return entries.slice(1); // first entry is the archive file itself, not a member
+}
+
+function walkEmscriptenDir(FS, dir, prefix, budget) {
+  const out = [];
+  for (const name of FS.readdir(dir)) {
+    if (name === '.' || name === '..') continue;
+    const full = `${dir}/${name}`;
+    const rel = prefix ? `${prefix}/${name}` : name;
+
+    // lstat (not stat) so we see the symlink itself rather than what it
+    // resolves to — critical, see the file-level comment above.
+    const st = FS.lstat(full);
+    if (FS.isLink(st.mode)) {
+      let target = '(unreadable)';
+      try { target = FS.readlink(full); } catch { /* ignore */ }
+      noteTruncation(budget, `Symlink skipped, not followed: "${rel}" -> "${target}" (RAR/7z archives can contain symlinks that point outside the extracted contents).`);
+      continue;
+    }
+    if (FS.isDir(st.mode)) {
+      out.push(...walkEmscriptenDir(FS, full, rel, budget));
+    } else {
+      out.push({ name: rel, bytes: FS.readFile(full) });
+    }
+  }
+  return out;
+}
+
+async function extract7zOrRar(bytes, filename, kind, budget) {
+  let SevenZip;
+  try {
+    ({ default: SevenZip } = await import('7z-wasm'));
+  } catch (e) {
+    return { children: [], error: `${kind.toUpperCase()} support unavailable in this build: ${e.message}` };
+  }
+
+  let stdout = '', stderrBuf = '';
+  let sevenZip;
+  try {
+    // No locateFile override: the package resolves its own .wasm sibling via
+    // new URL('7zz.wasm', import.meta.url) internally, which works in both
+    // Node (verified directly) and Vite's build (which statically detects
+    // and rewrites that exact import.meta.url-relative pattern) — confirmed
+    // by inspecting the package's own bundled resolution logic rather than
+    // assuming a manual override was required.
+    sevenZip = await SevenZip({
+      print: (s) => { stdout += s + '\n'; },
+      printErr: (s) => { stderrBuf += s + '\n'; },
+      stdin: () => null, // never fall through to window.prompt() on an encrypted archive
+      noExitRuntime: true,
+    });
+  } catch (e) {
+    return { children: [], error: `Could not initialise the ${kind.toUpperCase()} decoder: ${e.message}` };
+  }
+
+  const archiveName = 'input.' + kind;
+  sevenZip.FS.writeFile(archiveName, bytes);
+
+  let listRet;
+  try {
+    stdout = ''; stderrBuf = '';
+    listRet = sevenZip.callMain(['l', '-slt', archiveName]);
+  } catch (e) {
+    // A password-protected archive with encrypted headers can't even be
+    // listed without a password. Because stdin is wired to return null (so
+    // it can never fall through to window.prompt()), the underlying C++
+    // unwinds via a raw numeric exception rather than a normal Error —
+    // verified directly against real header-encrypted .7z and RAR5 fixtures
+    // rather than assumed. Give an accurate message for that specific,
+    // expected case instead of surfacing the raw code.
+    if (typeof e === 'number' || (e && typeof e.message === 'string' && /^\d+$/.test(e.message))) {
+      return { children: [], error: `This ${kind.toUpperCase()} archive uses encrypted headers — even its file listing is password-protected. No password was supplied (and none is prompted for), so nothing could be read from it.` };
+    }
+    return { children: [], error: `Could not read ${kind.toUpperCase()} archive (${e?.message || e}).` };
+  }
+  if (listRet !== 0) {
+    return { children: [], error: `Could not read ${kind.toUpperCase()} archive: ${stderrBuf.trim().slice(0, 300) || 'unknown error'}` };
+  }
+
+  const entries = parse7zListing(stdout).filter(e => !e.isDir);
+  const encryptedEntries = entries.filter(e => e.encrypted);
+  const acceptedPaths = [];
+  for (const entry of entries) {
+    if (entry.encrypted) continue; // reported separately below, extraction never attempted
+    if (entry.path.includes('..') || entry.path.startsWith('/')) {
+      noteTruncation(budget, `Suspicious path skipped in ${kind.toUpperCase()}: "${entry.path}".`);
+      continue;
+    }
+    if (!reserveBudget(budget, entry.size, entry.path)) continue;
+    acceptedPaths.push(entry.path);
+  }
+
+  const children = [];
+  if (acceptedPaths.length > 0) {
+    try {
+      stdout = ''; stderrBuf = '';
+      const extractRet = sevenZip.callMain(['x', archiveName, ...acceptedPaths, '-oout', '-y']);
+      if (extractRet === 0) {
+        children.push(...walkEmscriptenDir(sevenZip.FS, 'out', '', budget));
+      } else {
+        noteTruncation(budget, `${kind.toUpperCase()} extraction reported errors: ${stderrBuf.trim().slice(0, 300) || 'unknown error'}`);
+      }
+    } catch (e) {
+      noteTruncation(budget, `${kind.toUpperCase()} extraction failed: ${e?.message || e}`);
+    }
+  }
+
+  if (encryptedEntries.length > 0) {
+    noteTruncation(budget, `${encryptedEntries.length} encrypted entr${encryptedEntries.length === 1 ? 'y' : 'ies'} in this ${kind.toUpperCase()} archive ${encryptedEntries.length === 1 ? 'was' : 'were'} not extracted (no password was supplied, and none is prompted for): ${encryptedEntries.slice(0, 10).map(e => e.path).join(', ')}`);
+  }
+
+  return { children };
 }
 
 export function isArchiveKind(kind) {

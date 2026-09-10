@@ -54,7 +54,7 @@ const SUPPORTED_TYPES = {
 };
 
 const ACCEPT_EXTENSIONS = '.pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.html,.htm,.csv,.xml,.svg,.rtf,' +
-  '.har,.jar,.zip,.tar,.gz,.tgz,.bz2,.tbz2,.xz,.txz,' +
+  '.har,.jar,.zip,.tar,.gz,.tgz,.bz2,.tbz2,.xz,.txz,.7z,.rar,' +
   '.env,.ini,.cfg,.conf,.config,.properties,.toml,.yaml,.yml,.json,.tf,.tfvars,.tfstate,' +
   '.pem,.key,.crt,.cer,.csr,.exe,.dll,.sys,.scr,.elf,.so';
 
@@ -2209,7 +2209,7 @@ export default function App() {
           </p>
           <p style={{ fontSize: 11, color: 'var(--text-muted)', fontFamily: "'IBM Plex Mono', monospace", lineHeight: 1.8 }}>
             PDF · DOCX · XLSX · PPTX · HTML · CSV · XML · SVG · RTF<br />
-            HAR · JAR · ZIP/TAR/GZIP/BZIP2/XZ · ENV/YAML/TOML/INI<br />
+            HAR · JAR · ZIP/TAR/GZIP/BZIP2/XZ/7Z/RAR · ENV/YAML/TOML/INI<br />
             PEM/KEY/CRT · AWS/GCP/Azure/K8s configs · EXE/ELF (strings)
           </p>
           <p style={{ fontSize: 10.5, color: 'var(--text-muted)', fontFamily: "'IBM Plex Mono', monospace", marginTop: 10, opacity: 0.8 }}>

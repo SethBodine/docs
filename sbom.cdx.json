@@ -3,9 +3,9 @@
   "bomFormat": "CycloneDX",
   "specVersion": "1.5",
   "version": 1,
-  "serialNumber": "urn:uuid:deb7737e-400a-4b09-936c-e19e9ba5dc48",
+  "serialNumber": "urn:uuid:a2e30f43-cb53-4e8d-8289-c0a4be761e8b",
   "metadata": {
-    "timestamp": "2026-09-10T06:50:51.444Z",
+    "timestamp": "2026-09-10T11:47:31.366Z",
     "tools": {
       "components": [
         {
@@ -178,6 +178,60 @@
         {
           "name": "cdx:npm:package:path",
           "value": "node_modules/@vitejs/plugin-react"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "7z-wasm",
+      "version": "1.2.0",
+      "bom-ref": "doc-security-reader@1.0.0|7z-wasm@1.2.0",
+      "author": "Alexandru Ciuca",
+      "description": "7-Zip for JavaScript environments, compiled to WASM",
+      "licenses": [
+        {
+          "license": {
+            "name": "SEE LICENSE IN License.txt"
+          }
+        }
+      ],
+      "purl": "pkg:npm/7z-wasm@1.2.0",
+      "externalReferences": [
+        {
+          "url": "git+https://github.com/use-strict/7z-wasm.git",
+          "type": "vcs",
+          "comment": "as detected from PackageJson property \"repository.url\""
+        },
+        {
+          "url": "https://github.com/use-strict/7z-wasm#README.md",
+          "type": "website",
+          "comment": "as detected from PackageJson property \"homepage\""
+        },
+        {
+          "url": "https://github.com/use-strict/7z-wasm/issues",
+          "type": "issue-tracker",
+          "comment": "as detected from PackageJson property \"bugs.url\""
+        },
+        {
+          "url": "https://registry.npmjs.org/7z-wasm/-/7z-wasm-1.2.0.tgz",
+          "type": "distribution",
+          "hashes": [
+            {
+              "alg": "SHA-512",
+              "content": "0198ed5971657807b99d0dbb258212b3bd1c2028ced3366be0b538e48f695ca72b846d2a8845a0ab7563c2bf491c78a114bbaa81ceee4876159ffcf7bd70a377"
+            }
+          ],
+          "comment": "as detected from npm-ls property \"resolved\" and property \"integrity\""
+        }
+      ],
+      "properties": [
+        {
+          "name": "cdx:npm:package:constraint:engine:node",
+          "value": ">=8.0.0"
+        },
+        {
+          "name": "cdx:npm:package:path",
+          "value": "node_modules/7z-wasm"
         }
       ]
     },
@@ -1303,6 +1357,60 @@
         {
           "name": "cdx:npm:package:path",
           "value": "node_modules/react-refresh"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "readline-sync",
+      "version": "1.4.10",
+      "bom-ref": "doc-security-reader@1.0.0|readline-sync@1.4.10",
+      "author": "anseki",
+      "description": "Synchronous Readline for interactively running to have a conversation with the user via a console(TTY).",
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "purl": "pkg:npm/readline-sync@1.4.10",
+      "externalReferences": [
+        {
+          "url": "git://github.com/anseki/readline-sync.git",
+          "type": "vcs",
+          "comment": "as detected from PackageJson property \"repository.url\""
+        },
+        {
+          "url": "https://github.com/anseki/readline-sync",
+          "type": "website",
+          "comment": "as detected from PackageJson property \"homepage\""
+        },
+        {
+          "url": "https://github.com/anseki/readline-sync/issues",
+          "type": "issue-tracker",
+          "comment": "as detected from PackageJson property \"bugs.url\""
+        },
+        {
+          "url": "https://registry.npmjs.org/readline-sync/-/readline-sync-1.4.10.tgz",
+          "type": "distribution",
+          "hashes": [
+            {
+              "alg": "SHA-512",
+              "content": "80dbdaf3fe9401ef1061ea48407fe3436aa7f75423d01f6c62330106cdd0381f05d825dc2a02f141a2513fbeac595450b7e414fbc7c09026c2be38cc16eed873"
+            }
+          ],
+          "comment": "as detected from npm-ls property \"resolved\" and property \"integrity\""
+        }
+      ],
+      "properties": [
+        {
+          "name": "cdx:npm:package:constraint:engine:node",
+          "value": ">= 0.8.0"
+        },
+        {
+          "name": "cdx:npm:package:path",
+          "value": "node_modules/readline-sync"
         }
       ]
     },
@@ -6550,6 +6658,7 @@
       "ref": "doc-security-reader@1.0.0",
       "dependsOn": [
         "doc-security-reader@1.0.0|@vitejs/plugin-react@4.7.0",
+        "doc-security-reader@1.0.0|7z-wasm@1.2.0",
         "doc-security-reader@1.0.0|dompurify@3.4.15",
         "doc-security-reader@1.0.0|fflate@0.8.3",
         "doc-security-reader@1.0.0|jszip@3.10.2",
@@ -6576,6 +6685,12 @@
         "doc-security-reader@1.0.0|@types/babel__core@7.20.5",
         "doc-security-reader@1.0.0|react-refresh@0.17.0",
         "doc-security-reader@1.0.0|vite@5.4.21"
+      ]
+    },
+    {
+      "ref": "doc-security-reader@1.0.0|7z-wasm@1.2.0",
+      "dependsOn": [
+        "doc-security-reader@1.0.0|readline-sync@1.4.10"
       ]
     },
     {
@@ -6731,6 +6846,9 @@
     },
     {
       "ref": "doc-security-reader@1.0.0|react-refresh@0.17.0"
+    },
+    {
+      "ref": "doc-security-reader@1.0.0|readline-sync@1.4.10"
     },
     {
       "ref": "doc-security-reader@1.0.0|@types/trusted-types@2.0.7"
