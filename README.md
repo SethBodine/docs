@@ -17,6 +17,7 @@ A fully client-side document security analyser that runs entirely in the browser
 | HAR (Chrome/DevTools) | Authorization headers (Bearer/Basic, decoded), cookies/Set-Cookie, sensitive query params, POST bodies, JWTs, plaintext-HTTP endpoints |
 | JAR (Java Archive) | Recursive archive scan + MANIFEST.MF, code-signing detection, secrets in .properties/.xml/.yml resources |
 | ZIP / TAR / GZIP / BZIP2 / XZ (incl. .tgz/.tar.gz/.tbz2/.tar.bz2/.txz/.tar.xz) | Recursive extraction and scanning of every nested file, up to 5 levels deep, with hard resource-exhaustion limits (see below) |
+| 7-Zip (.7z) / RAR (.rar) | Recursive extraction via the real 7-Zip CLI compiled to WASM — one dependency covers both, since 7-Zip's own codec reads RAR natively. Password-protected entries are detected and skipped (reported as a finding) rather than attempted |
 | .env / .ini / .cfg / .conf / .properties / .toml / .yaml / .yml / .json | Shared secret scan + format-specific checks (Kubernetes kubeconfig, Docker registry auth, Terraform state, GCP service-account keys) |
 | PEM / KEY / CRT / CER / CSR / SSH keys | Private-key/certificate block classification, always-critical private-key detection |
 | EXE / DLL / SYS | Full PE32/PE32+ structural parsing: machine type, subsystem, compile timestamp, entry point, ASLR/DEP flags, per-section entropy (packing signal), full import table (DLL + function names) with suspicious-API classification (process injection, anti-debugging, persistence, credential access, keylogging, C2-adjacent networking) — plus the shared string/secret scan layered on top |
@@ -42,7 +43,12 @@ Opening archives is the biggest new attack surface a static analyser can take on
 
 Archive entries with a path-traversal pattern (`../`, absolute paths) are detected and skipped rather than extracted — including cases where the underlying ZIP library normalizes the path internally before exposing it, by checking the archive's raw pre-normalization entry name. Nothing extracted from an archive is ever written to disk; everything stays in memory for the life of the analysis. GZIP and XZ streams are decompressed incrementally so a bomb is caught and aborted mid-stream rather than after the fact; BZIP2 uses a byte-bounded output sink for the same reason.
 
-**Not yet implemented:** 7-Zip and RAR archives are detected (and reported as such) but not extracted. Full PCAP protocol/stream reconstruction (TLS SNI, JA3/JA4, DNS analysis) is planned for a later phase. Mach-O binaries get string/secret scanning only, not the structural parsing PE and ELF now have.
+**Not yet implemented:** Full PCAP protocol/stream reconstruction (TLS SNI, JA3/JA4, DNS analysis) is planned for a later phase. Mach-O binaries get string/secret scanning only, not the structural parsing PE and ELF now have.
+
+### A note on 7z/RAR and password-protected archives
+
+7z-wasm's underlying stdin handling can fall through to a native `window.prompt()` in a real browser if an encrypted archive is processed without an override — this build explicitly disables that (`stdin: () => null`) so a hostile password-protected archive can't pop a dialog in the user's tab. Encrypted entries are detected from the archive's technical listing and skipped entirely — not attempted, not silently ignored, but reported as their own finding — since there's no password to try. The 7z/RAR WASM module (~1.6MB) is lazy-loaded only when such a file is actually encountered, so it doesn't add to the initial page load for everyone else.
+
 
 All binary parsing (PE/ELF) is defensive by design — it's reading untrusted, potentially malformed or deliberately hostile files. Every read is bounds-checked, every walk (sections, imports, symbols) is capped, and a parse failure degrades to the string/secret-scan fallback with a note rather than crashing the analysis. Verified against real production binaries (`/bin/ls`, `/bin/bash`, real PE executables) as well as deliberately truncated and corrupted inputs.
 
@@ -151,6 +157,17 @@ If not set, telemetry is silently skipped and everything else works normally.
 - No telemetry, no analytics, no external requests
 - The `_headers` file enforces strict CSP to prevent any unintended outbound connections
 - `connect-src: 'self'` — the page cannot phone home even if the code tried to
+
+## Software Bill of Materials (SBOM)
+
+`sbom.cdx.json` at the project root is a [CycloneDX](https://cyclonedx.org/) 1.5 SBOM covering every direct and transitive npm dependency, generated from `package.json`/`package-lock.json`. Regenerate it any time dependencies change:
+
+```bash
+npm install
+npx --yes @cyclonedx/cyclonedx-npm --output-file sbom.cdx.json --output-format json --spec-version 1.5
+```
+
+Treat a diff in `sbom.cdx.json` the same as a diff in `package-lock.json` during review — a new component appearing there that wasn't part of a deliberate, discussed change is a signal to stop and ask why before merging, not to wave it through. (This file exists precisely because that happened once already during development: a WASM build of 7-Zip, added to enable RAR/7z extraction, showed up in a routine SBOM generation without ever having been proposed, reviewed, or tested, and was removed once found. Regenerating this file after any dependency change is how that stays caught going forward.)
 
 ## Tech Stack
 

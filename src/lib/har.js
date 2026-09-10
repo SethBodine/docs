@@ -102,7 +102,7 @@ export async function analyseHar(arrayBuffer) {
       findings.push(...scanForSecrets(res.content.text, `HAR response body from ${host || url}`));
     }
 
-    if (previewEntries.length < 200) {
+    if (previewEntries.length < 2000) {
       previewEntries.push({ method: req.method, url, status: res.status, host });
     }
   }
@@ -138,6 +138,6 @@ export async function analyseHar(arrayBuffer) {
     metadata,
     textContent: textContent.slice(0, 5000),
     externalLinks,
-    previewData: { type: 'har', entries: previewEntries },
+    previewData: { type: 'har', entries: previewEntries, totalRequests: entries.length },
   };
 }

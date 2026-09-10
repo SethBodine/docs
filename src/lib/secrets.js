@@ -105,6 +105,140 @@ const MATCHERS = [
     tier: 'confirmed',
     category: 'Chat / Collaboration',
   },
+  // ── Additional provider-specific patterns, modeled on the default rulesets
+  // shipped by gitleaks and trufflehog — fixed, distinctive prefix formats
+  // are low-false-positive, which is why those tools (and this one) treat
+  // them as "confirmed" rather than "potential" like the generic patterns
+  // below. Not exhaustive — this covers the providers most commonly seen in
+  // real leaked-secret incidents.
+  {
+    name: 'Stripe API Key',
+    re: /\b(?:sk|rk|pk)_(?:live|test)_[A-Za-z0-9]{10,99}\b/g,
+    tier: 'confirmed',
+    category: 'Payment Processing',
+  },
+  {
+    name: 'Twilio API Key / Account SID',
+    re: /\b(?:SK[a-f0-9]{32}|AC[a-f0-9]{32})\b/g,
+    tier: 'confirmed',
+    category: 'Communications',
+  },
+  {
+    name: 'SendGrid API Key',
+    re: /\bSG\.[A-Za-z0-9_-]{22}\.[A-Za-z0-9_-]{43}\b/g,
+    tier: 'confirmed',
+    category: 'Communications',
+  },
+  {
+    name: 'Mailgun API Key',
+    re: /\bkey-[0-9a-zA-Z]{32}\b/g,
+    tier: 'confirmed',
+    category: 'Communications',
+  },
+  {
+    name: 'Mailchimp API Key',
+    re: /\b[0-9a-f]{32}-us[0-9]{1,2}\b/g,
+    tier: 'confirmed',
+    category: 'Communications',
+  },
+  {
+    name: 'npm Access Token',
+    re: /\bnpm_[A-Za-z0-9]{36}\b/g,
+    tier: 'confirmed',
+    category: 'Source Control',
+  },
+  {
+    name: 'PyPI Upload Token',
+    re: /\bpypi-AgEIcHlwaS5vcmc[A-Za-z0-9_-]{50,}\b/g,
+    tier: 'confirmed',
+    category: 'Source Control',
+  },
+  {
+    name: 'Google API Key',
+    re: /\bAIza[0-9A-Za-z_-]{35}\b/g,
+    tier: 'confirmed',
+    category: 'Cloud Credentials',
+  },
+  {
+    name: 'Google OAuth Access Token',
+    re: /\bya29\.[0-9A-Za-z_-]{20,}\b/g,
+    tier: 'confirmed',
+    category: 'Cloud Credentials',
+  },
+  {
+    name: 'Facebook Access Token',
+    re: /\bEAA[A-Za-z0-9]{20,}\b/g,
+    tier: 'confirmed',
+    category: 'Social / Marketing',
+  },
+  {
+    name: 'Shopify Access Token',
+    re: /\bshp(?:at|ss|ca)_[a-fA-F0-9]{32}\b/g,
+    tier: 'confirmed',
+    category: 'E-commerce',
+  },
+  {
+    name: 'Twitter/X Bearer Token',
+    re: /\bAAAAAAAAAAAAAAAAAAAAA[A-Za-z0-9%]{35,}\b/g,
+    tier: 'confirmed',
+    category: 'Social / Marketing',
+  },
+  {
+    name: 'Grafana API Key',
+    re: /\beyJrIjoi[A-Za-z0-9]{50,}\b/g,
+    tier: 'confirmed',
+    category: 'Observability',
+  },
+  {
+    name: 'New Relic API Key',
+    re: /\bNRAK-[A-Z0-9]{27}\b/g,
+    tier: 'confirmed',
+    category: 'Observability',
+  },
+  {
+    name: 'Age Encryption Private Key',
+    re: /\bAGE-SECRET-KEY-1[A-Z0-9]{58}\b/g,
+    tier: 'confirmed',
+    category: 'Cryptographic Material',
+  },
+  {
+    name: 'Airtable API Key',
+    re: /\bkey[A-Za-z0-9]{14}\b/g,
+    tier: 'potential', // short/generic-shaped enough to warrant the lower tier
+    category: 'Generic Secret',
+  },
+  {
+    name: 'Dropbox Access Token',
+    re: /\bsl\.[A-Za-z0-9_-]{130,}\b/g,
+    tier: 'confirmed',
+    category: 'Cloud Credentials',
+  },
+  {
+    name: 'OpenAI API Key',
+    re: /\bsk-[A-Za-z0-9]{20}T3BlbkFJ[A-Za-z0-9]{20}\b|\bsk-proj-[A-Za-z0-9_-]{20,}\b/g,
+    tier: 'confirmed',
+    category: 'AI / ML Services',
+  },
+  {
+    name: 'Anthropic API Key',
+    re: /\bsk-ant-[A-Za-z0-9_-]{90,}\b/g,
+    tier: 'confirmed',
+    category: 'AI / ML Services',
+  },
+  {
+    name: 'Okta API Token (context-matched)',
+    re: /okta[a-z_]{0,20}(?:api[_-]?token|token)\s*[:=]\s*["']?(00[A-Za-z0-9_-]{40})["']?/gi,
+    tier: 'confirmed',
+    category: 'Cloud Credentials',
+    group: 1,
+  },
+  {
+    name: 'Heroku API Key (context-matched)',
+    re: /heroku[a-z_]{0,20}(?:api[_-]?key|token)\s*[:=]\s*["']?([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})["']?/gi,
+    tier: 'confirmed',
+    category: 'Cloud Credentials',
+    group: 1,
+  },
   {
     name: 'Slack Webhook URL',
     re: /https:\/\/hooks\.slack\.com\/services\/T[0-9A-Z]+\/B[0-9A-Z]+\/[0-9A-Za-z]+/g,
@@ -160,6 +294,7 @@ const MATCHERS = [
     name: 'Generic API Key Assignment',
     re: /\b(api[_-]?key|apikey|access[_-]?token|client[_-]?secret|secret[_-]?key)\s*[:=]\s*["']?([A-Za-z0-9_\-./+]{12,})["']?/gi,
     tier: 'potential',
+    genericCatchAll: true,
     category: 'Generic Secret',
     group: 2,
   },
@@ -167,6 +302,7 @@ const MATCHERS = [
     name: 'Generic Password Assignment',
     re: /\b(password|passwd|pwd)\s*[:=]\s*["']?([^\s"'<>]{4,})["']?/gi,
     tier: 'potential',
+    genericCatchAll: true,
     category: 'Generic Secret',
     group: 2,
   },
@@ -189,6 +325,7 @@ export function scanForSecrets(text, sourceLabel = '') {
   const scanText = text.slice(0, MAX_TEXT_SCAN_LENGTH);
   const findings = [];
   const seen = new Set();
+  const specificallyMatchedValues = new Set(); // raw values already caught by a non-generic matcher
 
   for (const matcher of MATCHERS) {
     if (findings.length >= MAX_FINDINGS_PER_FILE) break;
@@ -198,10 +335,17 @@ export function scanForSecrets(text, sourceLabel = '') {
     while ((match = matcher.re.exec(scanText)) && countForMatcher < 20) {
       const raw = matcher.group ? match[matcher.group] : match[0];
       if (!raw) continue;
+
+      // A provider-specific pattern (e.g. Stripe, AWS) already identified this
+      // exact value more precisely — don't also report it as a generic
+      // "API key" / "password" catch-all finding for the same secret.
+      if (matcher.genericCatchAll && specificallyMatchedValues.has(raw)) { countForMatcher++; continue; }
+
       const dedupeKey = matcher.name + '|' + raw;
       if (seen.has(dedupeKey)) continue;
       seen.add(dedupeKey);
       countForMatcher++;
+      if (!matcher.genericCatchAll) specificallyMatchedValues.add(raw);
 
       let tier = matcher.tier;
       if (tier === 'validate') {

@@ -699,11 +699,19 @@ async function analyseArchiveContainer(raw, filename, kind, depth, budget) {
     return { findings, metadata, textContent: '', externalLinks: [], previewData: { type: 'archive', kind, children: [] } };
   }
 
-  const { children = [], error } = await extractOneLayer(kind, raw, filename, budget);
+  const { children = [], error, encryptedCount, encryptedNames } = await extractOneLayer(kind, raw, filename, budget);
   metadata['Extracted Files'] = String(children.length);
 
   if (error) {
     findings.push({ severity: 'low', category: 'Archive', title: 'Archive could not be fully processed', detail: error });
+  }
+
+  if (encryptedCount > 0) {
+    findings.push({
+      severity: 'medium', category: 'Archive',
+      title: `${encryptedCount} password-protected entr${encryptedCount === 1 ? 'y' : 'ies'} could not be scanned`,
+      detail: `No password was provided, so these entries were not extracted or analysed: ${encryptedNames.slice(0, 10).join(', ')}${encryptedNames.length > 10 ? ` (+${encryptedNames.length - 10} more)` : ''}. Encryption itself isn't a red flag, but contents are unknown.`,
+    });
   }
 
   const isJar = filename.toLowerCase().endsWith('.jar') && kind === 'zip';
@@ -1317,11 +1325,29 @@ function MetadataTable({ metadata }) {
   );
 }
 
+function ShowMoreButton({ remaining, onClick }) {
+  return (
+    <button
+      onClick={onClick}
+      style={{
+        background: 'none', border: '1px dashed var(--border-active)', borderRadius: 3,
+        padding: '8px 12px', color: 'var(--accent-blue)', fontSize: 12, cursor: 'pointer',
+        fontFamily: "'IBM Plex Mono', monospace", textAlign: 'center', width: '100%',
+      }}
+    >
+      …and {remaining} more — click to show all
+    </button>
+  );
+}
+
 function LinksList({ links }) {
+  const PAGE_SIZE = 30;
+  const [visibleCount, setVisibleCount] = useState(PAGE_SIZE);
   if (!links || links.length === 0) return <p style={{ color: 'var(--text-muted)', fontSize: 13 }}>No external links detected.</p>;
+  const visible = links.slice(0, visibleCount);
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-      {links.slice(0, 30).map((l, i) => {
+      {visible.map((l, i) => {
         const isSusp = /\.exe|\.bat|\.ps1|javascript:|data:|powershell/i.test(l.url);
         return (
           <div key={i} style={{ background: 'var(--bg-card)', border: `1px solid var(--border)`, borderLeft: `3px solid ${isSusp ? 'var(--risk-high)' : 'var(--border-active)'}`, borderRadius: 3, padding: '8px 12px' }}>
@@ -1330,7 +1356,9 @@ function LinksList({ links }) {
           </div>
         );
       })}
-      {links.length > 30 && <p style={{ fontSize: 12, color: 'var(--text-muted)' }}>…and {links.length - 30} more</p>}
+      {links.length > visibleCount && (
+        <ShowMoreButton remaining={links.length - visibleCount} onClick={() => setVisibleCount(c => c + 200)} />
+      )}
     </div>
   );
 }
@@ -1361,17 +1389,25 @@ function ArchiveChildRow({ child }) {
 }
 
 function ArchiveContents({ children }) {
+  const PAGE_SIZE = 100;
+  const [visibleCount, setVisibleCount] = useState(PAGE_SIZE);
   if (!children || children.length === 0) {
     return <p style={{ color: 'var(--text-muted)', fontSize: 13 }}>No extractable entries in this archive.</p>;
   }
+  const visible = children.slice(0, visibleCount);
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-      {children.map((c, i) => <ArchiveChildRow key={i} child={c} />)}
+      {visible.map((c, i) => <ArchiveChildRow key={i} child={c} />)}
+      {children.length > visibleCount && (
+        <ShowMoreButton remaining={children.length - visibleCount} onClick={() => setVisibleCount(n => n + 500)} />
+      )}
     </div>
   );
 }
 
-function HarPreview({ entries }) {
+function HarPreview({ entries, totalRequests }) {
+  const PAGE_SIZE = 100;
+  const [visibleCount, setVisibleCount] = useState(PAGE_SIZE);
   if (!entries || entries.length === 0) {
     return <p style={{ color: 'var(--text-muted)', fontSize: 13 }}>No requests found in this HAR file.</p>;
   }
@@ -1382,15 +1418,26 @@ function HarPreview({ entries }) {
     if (status >= 300) return 'var(--risk-medium)';
     return 'var(--accent-green)';
   };
+  const visible = entries.slice(0, visibleCount);
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 4, maxHeight: 600, overflowY: 'auto' }}>
-      {entries.map((e, i) => (
-        <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '6px 10px', background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: 3, fontFamily: "'IBM Plex Mono', monospace", fontSize: 11 }}>
-          <span style={{ color: 'var(--accent-blue)', width: 48, flexShrink: 0 }}>{e.method}</span>
-          <span style={{ color: statusColor(e.status), width: 36, flexShrink: 0 }}>{e.status || '—'}</span>
-          <span style={{ color: 'var(--text-secondary)', wordBreak: 'break-all', flex: 1 }}>{e.url}</span>
-        </div>
-      ))}
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+      {totalRequests > entries.length && (
+        <p style={{ fontSize: 11, color: 'var(--text-muted)', fontFamily: "'IBM Plex Mono', monospace" }}>
+          Showing the first {entries.length.toLocaleString()} of {totalRequests.toLocaleString()} requests (all were still scanned for secrets — this only limits what's rendered here).
+        </p>
+      )}
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 4, maxHeight: 600, overflowY: 'auto' }}>
+        {visible.map((e, i) => (
+          <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '6px 10px', background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: 3, fontFamily: "'IBM Plex Mono', monospace", fontSize: 11 }}>
+            <span style={{ color: 'var(--accent-blue)', width: 48, flexShrink: 0 }}>{e.method}</span>
+            <span style={{ color: statusColor(e.status), width: 36, flexShrink: 0 }}>{e.status || '—'}</span>
+            <span style={{ color: 'var(--text-secondary)', wordBreak: 'break-all', flex: 1 }}>{e.url}</span>
+          </div>
+        ))}
+      </div>
+      {entries.length > visibleCount && (
+        <ShowMoreButton remaining={entries.length - visibleCount} onClick={() => setVisibleCount(n => n + 500)} />
+      )}
     </div>
   );
 }
@@ -1455,24 +1502,22 @@ function FullView({ file, previewData }) {
     return () => { if (blobUrl) URL.revokeObjectURL(blobUrl); };
   }, [blobUrl]);
 
+  const ext = file?.name.split('.').pop().toLowerCase();
+  const type = previewData?.type;
+  const isPdf = type === 'pdf';
+  const nativeRenderable = type === 'html' || type === 'svg'; // these get a real sandboxed iframe
+
   const open = React.useCallback(() => {
     if (isPdf) {
-      // PDF.js handles rendering — no blob URL needed
-      setConfirmed(true);
-    } else {
+      setConfirmed(true); // PDF.js handles rendering — no blob URL needed
+    } else if (nativeRenderable) {
       const url = URL.createObjectURL(file);
       setBlobUrl(url);
       setConfirmed(true);
+    } else {
+      setConfirmed(true); // everything else renders from already-parsed previewData, no blob needed
     }
-  }, [file]);
-
-  const ext = file?.name.split('.').pop().toLowerCase();
-  const isPdf    = ext === 'pdf';
-  const isHtml   = ['html','htm'].includes(ext);
-  const isSvg    = ext === 'svg';
-  const isCsv    = ext === 'csv';
-  const isXml    = ext === 'xml';
-  const nativeRenderable = isHtml || isSvg; // PDF now uses canvas, not iframe
+  }, [file, isPdf, nativeRenderable]);
 
   const warningStyle = {
     background: 'rgba(239,68,68,0.08)',
@@ -1481,6 +1526,20 @@ function FullView({ file, previewData }) {
     padding: '16px 20px',
     marginBottom: 16,
   };
+
+  // What the warning banner should actually promise — this must match what
+  // the confirmed view below actually does, or "I understand" leads to a
+  // broken/blank screen (this was a real bug: EXE/PCAP/archives/env-files
+  // all claimed "a converted view will be shown" and then rendered nothing).
+  function warningMessage() {
+    if (isPdf) return 'Renders all pages of the PDF at full fidelity using the built-in renderer. No scripts are executed.';
+    if (nativeRenderable) return `Renders the ${ext?.toUpperCase()} file with scripts and external resources allowed.`;
+    if (type === 'office') return `Office documents cannot be rendered natively in a browser. Full View uses the same conversion as Safe Preview.`;
+    if (type === 'csv' || type === 'xml') return 'Displays the raw file content as text — not executed, not rendered as markup.';
+    if (type === 'archive') return `This is an archive — Full View lists its contents the same way Safe Preview does, with each entry's findings expandable.`;
+    if (type === 'har') return `This is a HAR (HTTP capture) — Full View lists the requests the same way Safe Preview does. Full headers/cookies/bodies were scanned but are not displayed verbatim here.`;
+    return `This format (${ext?.toUpperCase() || 'unknown'}) has no visual preview — there is nothing to convert or render. Full View will show the same as Safe Preview: check the Findings and Metadata tabs for what was actually found in this file.`;
+  }
 
   if (!confirmed) {
     return (
@@ -1493,18 +1552,8 @@ function FullView({ file, previewData }) {
                 Full View — unsanitised content
               </p>
               <p style={{ fontSize: 12, color: 'var(--text-secondary)', lineHeight: 1.7 }}>
-                {isPdf
-                  ? 'Renders all pages of the PDF at full fidelity using the built-in renderer. No scripts are executed.'
-                  : nativeRenderable
-                    ? `Renders the ${ext.toUpperCase()} file with scripts and external resources allowed.`
-                    : `This format (${ext.toUpperCase()}) cannot be natively rendered. The converted view will be shown.`
-                }
+                {warningMessage()}
               </p>
-              {previewData?.type === 'office' && (
-                <p style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 6, fontStyle: 'italic' }}>
-                  Office documents cannot be rendered natively in a browser. Full View uses the same conversion as Safe Preview.
-                </p>
-              )}
             </div>
           </div>
           <button
@@ -1535,7 +1584,7 @@ function FullView({ file, previewData }) {
     </div>
   );
 
-  // PDF — use canvas renderer (works in all browsers, no iframe PDF issues)
+  // PDF — canvas renderer (works in all browsers, no iframe PDF quirks)
   if (isPdf && previewData?.bytes) {
     return (
       <div>
@@ -1545,11 +1594,11 @@ function FullView({ file, previewData }) {
     );
   }
 
-  // HTML/SVG — blob URL in iframe with full permissions
+  // HTML/SVG — blob URL in a sandboxed iframe with full permissions
   if (nativeRenderable && blobUrl) {
     return (
       <div>
-        {closebar(`${ext.toUpperCase()} rendered with scripts and external resources allowed. Top-level navigation blocked.`)}
+        {closebar(`${ext?.toUpperCase()} rendered with scripts and external resources allowed. Top-level navigation blocked.`)}
         <iframe
           src={blobUrl}
           sandbox="allow-same-origin allow-scripts allow-forms allow-popups"
@@ -1560,18 +1609,19 @@ function FullView({ file, previewData }) {
     );
   }
 
-  // CSV/XML — raw display
-  if ((isCsv || isXml) && previewData) {
+  // CSV / plain-text-style (env, yaml, toml, pem, generic fallback all share
+  // the same 'xml' preview type as the raw-text renderer)
+  if ((type === 'csv' || type === 'xml') && previewData) {
     return (
       <div>
         {closebar('Raw file content — displayed as text, not executed.')}
-        {isCsv ? <CsvPreview text={previewData.text} /> : <XmlPreview text={previewData.text} />}
+        {type === 'csv' ? <CsvPreview text={previewData.text} /> : <XmlPreview text={previewData.text} />}
       </div>
     );
   }
 
-  // Office / RTF — same converted view
-  if (previewData) {
+  // Office / RTF — converted view
+  if (type === 'office' && previewData) {
     return (
       <div>
         {closebar(`${ext?.toUpperCase()} cannot be natively rendered — showing converted view.`)}
@@ -1580,7 +1630,40 @@ function FullView({ file, previewData }) {
     );
   }
 
-  return null;
+  // Archive — same expandable contents list as Safe Preview
+  if (type === 'archive') {
+    return (
+      <div>
+        {closebar(`${previewData.kind?.toUpperCase()} archive — listing contents, no visual document to render.`)}
+        <ArchiveContents children={previewData.children} />
+      </div>
+    );
+  }
+
+  // HAR — same request list as Safe Preview
+  if (type === 'har') {
+    return (
+      <div>
+        {closebar('HAR capture — listing requests, no visual document to render.')}
+        <HarPreview entries={previewData.entries} totalRequests={previewData.totalRequests} />
+      </div>
+    );
+  }
+
+  // Genuinely nothing to show (EXE, ELF, Mach-O, PCAP, and anything else with
+  // previewData.type === 'unsupported') — say so plainly instead of a blank screen.
+  return (
+    <div>
+      {closebar(`${ext?.toUpperCase() || 'This file type'} has no visual preview.`)}
+      <div style={{ textAlign: 'center', padding: '40px 20px', color: 'var(--text-muted)' }}>
+        <FileText size={32} style={{ margin: '0 auto 12px', opacity: 0.5 }} />
+        <p style={{ fontSize: 13 }}>
+          There's no document or markup to render for .{ext || previewData?.ext || 'this'} files — this format was analysed for embedded secrets, strings, and structure only.
+        </p>
+        <p style={{ fontSize: 12, marginTop: 8 }}>Check the <strong>Findings</strong> and <strong>Metadata</strong> tabs for what was found.</p>
+      </div>
+    </div>
+  );
 }
 
 // ─── DOCUMENT PREVIEW COMPONENT ─────────────────────────────────────────────
@@ -1953,7 +2036,7 @@ function DocumentPreview({ previewData, file }) {
     'RTF rendered as plain text only — binary content and control sequences stripped.'
   );
   if (type === 'har') return wrap(
-    <HarPreview entries={previewData.entries} />,
+    <HarPreview entries={previewData.entries} totalRequests={previewData.totalRequests} />,
     'Requests listed for context — full headers, cookies, and bodies are scanned but not rendered here.'
   );
   if (type === 'archive') return wrap(
@@ -1964,7 +2047,8 @@ function DocumentPreview({ previewData, file }) {
   return (
     <div style={{ padding: 32, textAlign: 'center', color: 'var(--text-muted)' }}>
       <FileText size={28} style={{ margin: '0 auto 10px' }} />
-      <p style={{ fontSize: 13 }}>No preview available for .{previewData.ext} files.</p>
+      <p style={{ fontSize: 13 }}>No visual preview for .{previewData.ext || 'this'} files — there's no document or markup to render.</p>
+      <p style={{ fontSize: 12, marginTop: 6 }}>This format was analysed for embedded secrets, strings, and structure instead — see the <strong>Findings</strong> and <strong>Metadata</strong> tabs.</p>
     </div>
   );
 }
@@ -1978,6 +2062,7 @@ export default function App() {
   const [tab, setTab] = useState('findings');
   const [showPreview, setShowPreview] = useState(false);
   const [dragging, setDragging] = useState(false);
+  const fileInputRef = React.useRef(null);
   const [darkMode, setDarkMode] = useState(() => {
     const saved = localStorage.getItem('docscan-theme');
     return saved ? saved === 'dark' : true; // default dark
@@ -2012,6 +2097,7 @@ export default function App() {
   const onFileChange = (e) => {
     const f = e.target.files?.[0];
     if (f) processFile(f);
+    e.target.value = ''; // allow re-selecting the same file to re-trigger onChange
   };
 
   const onDrop = useCallback((e) => {
@@ -2085,8 +2171,15 @@ export default function App() {
 
       <div style={{ flex: 1, maxWidth: 900, margin: '0 auto', width: '100%', padding: '16px 12px' }}>
 
-        {/* Drop zone */}
+        {/* Drop zone — the whole box is clickable, not just the inner text link,
+            so a tap anywhere in it (icon, "or drop here" text, empty space)
+            opens the file picker the same way a drop anywhere in it works. */}
         <div
+          onClick={() => fileInputRef.current?.click()}
+          onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); fileInputRef.current?.click(); } }}
+          role="button"
+          tabIndex={0}
+          aria-label="Select a file to scan, or drop one here"
           onDragOver={(e) => { e.preventDefault(); setDragging(true); }}
           onDragLeave={() => setDragging(false)}
           onDrop={onDrop}
@@ -2101,18 +2194,26 @@ export default function App() {
             marginBottom: 16,
           }}
         >
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept={ACCEPT_EXTENSIONS}
+            onChange={onFileChange}
+            onClick={(e) => e.stopPropagation()}
+            style={{ display: 'none' }}
+          />
           <Upload size={28} color={dragging ? 'var(--accent-green)' : 'var(--text-muted)'} style={{ margin: '0 auto 10px' }} />
           <p style={{ fontSize: 15, color: 'var(--text-primary)', marginBottom: 6, fontWeight: 500 }}>
-            <label style={{ color: 'var(--accent-green)', cursor: 'pointer' }}>
-              Tap to select a file
-              <input type="file" accept={ACCEPT_EXTENSIONS} onChange={onFileChange} style={{ display: 'none' }} />
-            </label>
+            <span style={{ color: 'var(--accent-green)' }}>Tap to select a file</span>
             <span style={{ color: 'var(--text-muted)', fontSize: 13 }}> or drop here</span>
           </p>
           <p style={{ fontSize: 11, color: 'var(--text-muted)', fontFamily: "'IBM Plex Mono', monospace", lineHeight: 1.8 }}>
             PDF · DOCX · XLSX · PPTX · HTML · CSV · XML · SVG · RTF<br />
             HAR · JAR · ZIP/TAR/GZIP/BZIP2/XZ · ENV/YAML/TOML/INI<br />
             PEM/KEY/CRT · AWS/GCP/Azure/K8s configs · EXE/ELF (strings)
+          </p>
+          <p style={{ fontSize: 10.5, color: 'var(--text-muted)', fontFamily: "'IBM Plex Mono', monospace", marginTop: 10, opacity: 0.8 }}>
+            Max {ARCHIVE_LIMITS.MAX_UPLOAD_BYTES / 1024 / 1024}MB per file · archives expand up to {ARCHIVE_LIMITS.MAX_TOTAL_EXPANDED_BYTES / 1024 / 1024}MB, {ARCHIVE_LIMITS.MAX_FILES_PER_ARCHIVE.toLocaleString()} files, {ARCHIVE_LIMITS.MAX_RECURSION_DEPTH} levels deep
           </p>
         </div>
 
@@ -2371,6 +2472,18 @@ export default function App() {
         </p>
         <p style={{ fontSize: 10, color: 'var(--text-muted)', fontFamily: "'IBM Plex Mono', monospace" }}>
           Usage metadata (IP, filename, type, device, risk result) is logged for monitoring.
+        </p>
+        <p style={{ fontSize: 10, marginTop: 4 }}>
+          <a
+            href="https://github.com/SethBodine/docs"
+            target="_blank"
+            rel="noopener noreferrer"
+            style={{ color: 'var(--text-muted)', fontFamily: "'IBM Plex Mono', monospace", textDecoration: 'none' }}
+            onMouseOver={(e) => e.currentTarget.style.color = 'var(--accent-green)'}
+            onMouseOut={(e) => e.currentTarget.style.color = 'var(--text-muted)'}
+          >
+            View source on GitHub ↗
+          </a>
         </p>
       </footer>
     </div>
