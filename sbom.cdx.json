@@ -3,9 +3,9 @@
   "bomFormat": "CycloneDX",
   "specVersion": "1.5",
   "version": 1,
-  "serialNumber": "urn:uuid:a2e30f43-cb53-4e8d-8289-c0a4be761e8b",
+  "serialNumber": "urn:uuid:8e03adb8-e07b-4f2a-932b-b0a3269fe1be",
   "metadata": {
-    "timestamp": "2026-09-10T11:47:31.366Z",
+    "timestamp": "2026-09-11T19:43:28.308Z",
     "tools": {
       "components": [
         {
@@ -232,6 +232,56 @@
         {
           "name": "cdx:npm:package:path",
           "value": "node_modules/7z-wasm"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "blueimp-md5",
+      "version": "2.19.0",
+      "bom-ref": "doc-security-reader@1.0.0|blueimp-md5@2.19.0",
+      "author": "Sebastian Tschan",
+      "description": "JavaScript MD5 implementation. Compatible with server-side environments like Node.js, module loaders like RequireJS, Browserify or webpack and all web browsers.",
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "purl": "pkg:npm/blueimp-md5@2.19.0",
+      "externalReferences": [
+        {
+          "url": "git://github.com/blueimp/JavaScript-MD5.git",
+          "type": "vcs",
+          "comment": "as detected from PackageJson property \"repository.url\""
+        },
+        {
+          "url": "https://github.com/blueimp/JavaScript-MD5",
+          "type": "website",
+          "comment": "as detected from PackageJson property \"homepage\""
+        },
+        {
+          "url": "https://github.com/blueimp/JavaScript-MD5/issues",
+          "type": "issue-tracker",
+          "comment": "as detected from PackageJson property \"bugs.url\""
+        },
+        {
+          "url": "https://registry.npmjs.org/blueimp-md5/-/blueimp-md5-2.19.0.tgz",
+          "type": "distribution",
+          "hashes": [
+            {
+              "alg": "SHA-512",
+              "content": "0d142b0fa809cb2f056e2138b3e6c3a174bd8625b755bc79b82770bdc09fdf32c72fe22fecbb461cba6bf86655f2b1c6f2d2bbeba146601c116eef2910b4edfb"
+            }
+          ],
+          "comment": "as detected from npm-ls property \"resolved\" and property \"integrity\""
+        }
+      ],
+      "properties": [
+        {
+          "name": "cdx:npm:package:path",
+          "value": "node_modules/blueimp-md5"
         }
       ]
     },
@@ -482,56 +532,6 @@
         {
           "name": "cdx:npm:package:path",
           "value": "node_modules/mammoth"
-        }
-      ]
-    },
-    {
-      "type": "library",
-      "name": "papaparse",
-      "version": "5.7.0",
-      "bom-ref": "doc-security-reader@1.0.0|papaparse@5.7.0",
-      "author": "Matthew Holt",
-      "description": "Fast and powerful CSV parser for the browser that supports web workers and streaming large files. Converts CSV to JSON and JSON to CSV.",
-      "licenses": [
-        {
-          "license": {
-            "id": "MIT"
-          }
-        }
-      ],
-      "purl": "pkg:npm/papaparse@5.7.0",
-      "externalReferences": [
-        {
-          "url": "git+https://github.com/mholt/PapaParse.git",
-          "type": "vcs",
-          "comment": "as detected from PackageJson property \"repository.url\""
-        },
-        {
-          "url": "https://www.papaparse.com/",
-          "type": "website",
-          "comment": "as detected from PackageJson property \"homepage\""
-        },
-        {
-          "url": "https://github.com/mholt/PapaParse/issues",
-          "type": "issue-tracker",
-          "comment": "as detected from PackageJson property \"bugs.url\""
-        },
-        {
-          "url": "https://registry.npmjs.org/papaparse/-/papaparse-5.7.0.tgz",
-          "type": "distribution",
-          "hashes": [
-            {
-              "alg": "SHA-512",
-              "content": "a811b183fed0dca97d59f86bcf667be149ef9c74d72cd1ba8e628915e06f3f6fb2e2557b4a8fbb491eb6f99778ec9bddac2917fa70dc9ebd0e6cfcde93ffba44"
-            }
-          ],
-          "comment": "as detected from npm-ls property \"resolved\" and property \"integrity\""
-        }
-      ],
-      "properties": [
-        {
-          "name": "cdx:npm:package:path",
-          "value": "node_modules/papaparse"
         }
       ]
     },
@@ -5126,8 +5126,8 @@
     {
       "type": "library",
       "name": "nanoid",
-      "version": "3.3.18",
-      "bom-ref": "doc-security-reader@1.0.0|nanoid@3.3.18",
+      "version": "3.3.19",
+      "bom-ref": "doc-security-reader@1.0.0|nanoid@3.3.19",
       "author": "Andrey Sitnik",
       "description": "A tiny (116 bytes), secure URL-friendly unique string ID generator",
       "licenses": [
@@ -5137,7 +5137,7 @@
           }
         }
       ],
-      "purl": "pkg:npm/nanoid@3.3.18",
+      "purl": "pkg:npm/nanoid@3.3.19",
       "externalReferences": [
         {
           "url": "git+https://github.com/ai/nanoid.git",
@@ -5155,12 +5155,12 @@
           "comment": "as detected from PackageJson property \"bugs.url\""
         },
         {
-          "url": "https://registry.npmjs.org/nanoid/-/nanoid-3.3.18.tgz",
+          "url": "https://registry.npmjs.org/nanoid/-/nanoid-3.3.19.tgz",
           "type": "distribution",
           "hashes": [
             {
               "alg": "SHA-512",
-              "content": "0d38383096c631691f8ba55915d36ddbf71a31b432e0ebbe3a9fe1250bc611672755fa00d5003ec7344a033c3d8c3ebe19538e798aff98872e0d276e83a17afb"
+              "content": "636b54372e28bb0eadab9a0348a7906063b286450184d39c195ff4d8a0beea477d7831aa75977efa68cc8880e296b058be3127098bd5b6cb870ae3fea2449fba"
             }
           ],
           "comment": "as detected from npm-ls property \"resolved\" and property \"integrity\""
@@ -6266,8 +6266,8 @@
     {
       "type": "library",
       "name": "baseline-browser-mapping",
-      "version": "2.11.21",
-      "bom-ref": "doc-security-reader@1.0.0|baseline-browser-mapping@2.11.21",
+      "version": "2.11.22",
+      "bom-ref": "doc-security-reader@1.0.0|baseline-browser-mapping@2.11.22",
       "description": "A library for obtaining browser versions with their maximum supported Baseline feature set and Widely Available status.",
       "licenses": [
         {
@@ -6276,7 +6276,7 @@
           }
         }
       ],
-      "purl": "pkg:npm/baseline-browser-mapping@2.11.21",
+      "purl": "pkg:npm/baseline-browser-mapping@2.11.22",
       "externalReferences": [
         {
           "url": "git+https://github.com/web-platform-dx/baseline-browser-mapping.git",
@@ -6294,12 +6294,12 @@
           "comment": "as detected from PackageJson property \"bugs.url\""
         },
         {
-          "url": "https://registry.npmjs.org/baseline-browser-mapping/-/baseline-browser-mapping-2.11.21.tgz",
+          "url": "https://registry.npmjs.org/baseline-browser-mapping/-/baseline-browser-mapping-2.11.22.tgz",
           "type": "distribution",
           "hashes": [
             {
               "alg": "SHA-512",
-              "content": "ba1f2fa58ff5fd8c8592e9c80c51ffd76a7bffb55d3ca03585e8cc5446dd9046969d4cf41deb2fc7911b894e97c63c876483a3bbe64c6d0264461f9eb37feca5"
+              "content": "a56738c39d5f04577b99abf8dffcca442f9123a7f8c9fcd0a1595fbc4f1d10278fc9f927d5bccba74d458f440009cc826721618843320f6a9271f2915a05a26c"
             }
           ],
           "comment": "as detected from npm-ls property \"resolved\" and property \"integrity\""
@@ -6377,8 +6377,8 @@
     {
       "type": "library",
       "name": "electron-to-chromium",
-      "version": "1.5.425",
-      "bom-ref": "doc-security-reader@1.0.0|electron-to-chromium@1.5.425",
+      "version": "1.5.427",
+      "bom-ref": "doc-security-reader@1.0.0|electron-to-chromium@1.5.427",
       "author": "Kilian Valkhof",
       "description": "Provides a list of electron-to-chromium version mappings",
       "licenses": [
@@ -6388,7 +6388,7 @@
           }
         }
       ],
-      "purl": "pkg:npm/electron-to-chromium@1.5.425",
+      "purl": "pkg:npm/electron-to-chromium@1.5.427",
       "externalReferences": [
         {
           "url": "git+https://github.com/Kilian/electron-to-chromium.git",
@@ -6406,12 +6406,12 @@
           "comment": "as detected from PackageJson property \"bugs.url\""
         },
         {
-          "url": "https://registry.npmjs.org/electron-to-chromium/-/electron-to-chromium-1.5.425.tgz",
+          "url": "https://registry.npmjs.org/electron-to-chromium/-/electron-to-chromium-1.5.427.tgz",
           "type": "distribution",
           "hashes": [
             {
               "alg": "SHA-512",
-              "content": "42f3ed978d4450e9ee4f51c1bcc2a0c5744868735c6a004fb39d2eed550bce16576867ea4db672135e8b42c72d67f4501e51aef853967834d1e2663a61b785d6"
+              "content": "9f5e336f715db02859d813686ea34700931c3f789f16fe296a8c762ef0ab7d501072a1a24944606c997e3df3291d508d1644ad9cd73e45156d3c14d55b93c383"
             }
           ],
           "comment": "as detected from npm-ls property \"resolved\" and property \"integrity\""
@@ -6489,8 +6489,8 @@
     {
       "type": "library",
       "name": "update-browserslist-db",
-      "version": "1.3.2",
-      "bom-ref": "doc-security-reader@1.0.0|update-browserslist-db@1.3.2",
+      "version": "1.3.3",
+      "bom-ref": "doc-security-reader@1.0.0|update-browserslist-db@1.3.3",
       "author": "Andrey Sitnik",
       "description": "CLI tool to update caniuse-lite to refresh target browsers from Browserslist config",
       "licenses": [
@@ -6500,7 +6500,7 @@
           }
         }
       ],
-      "purl": "pkg:npm/update-browserslist-db@1.3.2",
+      "purl": "pkg:npm/update-browserslist-db@1.3.3",
       "externalReferences": [
         {
           "url": "git+https://github.com/browserslist/update-db.git",
@@ -6518,12 +6518,12 @@
           "comment": "as detected from PackageJson property \"bugs.url\""
         },
         {
-          "url": "https://registry.npmjs.org/update-browserslist-db/-/update-browserslist-db-1.3.2.tgz",
+          "url": "https://registry.npmjs.org/update-browserslist-db/-/update-browserslist-db-1.3.3.tgz",
           "type": "distribution",
           "hashes": [
             {
               "alg": "SHA-512",
-              "content": "510f8c4b1961466d5bce3854f8372e5df8c53b517336daa12b9fbd62f969f7422d0cb939bd3f77d80d2b16eeb5f677fb4554be63f55e6945b58da443a99f1527"
+              "content": "a49dac61ac104b447f588f76f068f91a53e14c6cdb31e96ad3ee0836d49834357d12b289717eb18c65a4a06fd59c1ddda549b4d3300b6aa92b503efba4ee530d"
             }
           ],
           "comment": "as detected from npm-ls property \"resolved\" and property \"integrity\""
@@ -6659,12 +6659,12 @@
       "dependsOn": [
         "doc-security-reader@1.0.0|@vitejs/plugin-react@4.7.0",
         "doc-security-reader@1.0.0|7z-wasm@1.2.0",
+        "doc-security-reader@1.0.0|blueimp-md5@2.19.0",
         "doc-security-reader@1.0.0|dompurify@3.4.15",
         "doc-security-reader@1.0.0|fflate@0.8.3",
         "doc-security-reader@1.0.0|jszip@3.10.2",
         "doc-security-reader@1.0.0|lucide-react@0.263.1",
         "doc-security-reader@1.0.0|mammoth@1.12.2",
-        "doc-security-reader@1.0.0|papaparse@5.7.0",
         "doc-security-reader@1.0.0|pdfjs-dist@4.10.38",
         "doc-security-reader@1.0.0|react-dom@18.3.1",
         "doc-security-reader@1.0.0|react@18.3.1",
@@ -6692,6 +6692,9 @@
       "dependsOn": [
         "doc-security-reader@1.0.0|readline-sync@1.4.10"
       ]
+    },
+    {
+      "ref": "doc-security-reader@1.0.0|blueimp-md5@2.19.0"
     },
     {
       "ref": "doc-security-reader@1.0.0|dompurify@3.4.15",
@@ -6731,9 +6734,6 @@
         "doc-security-reader@1.0.0|underscore@1.13.8",
         "doc-security-reader@1.0.0|xmlbuilder@10.1.1"
       ]
-    },
-    {
-      "ref": "doc-security-reader@1.0.0|papaparse@5.7.0"
     },
     {
       "ref": "doc-security-reader@1.0.0|pdfjs-dist@4.10.38",
@@ -6960,7 +6960,7 @@
     {
       "ref": "doc-security-reader@1.0.0|postcss@8.5.28",
       "dependsOn": [
-        "doc-security-reader@1.0.0|nanoid@3.3.18",
+        "doc-security-reader@1.0.0|nanoid@3.3.19",
         "doc-security-reader@1.0.0|picocolors@1.1.1",
         "doc-security-reader@1.0.0|source-map-js@1.2.1"
       ]
@@ -7198,7 +7198,7 @@
       "ref": "doc-security-reader@1.0.0|@esbuild/linux-x64@0.21.5"
     },
     {
-      "ref": "doc-security-reader@1.0.0|nanoid@3.3.18"
+      "ref": "doc-security-reader@1.0.0|nanoid@3.3.19"
     },
     {
       "ref": "doc-security-reader@1.0.0|picocolors@1.1.1"
@@ -7236,11 +7236,11 @@
     {
       "ref": "doc-security-reader@1.0.0|browserslist@4.28.9",
       "dependsOn": [
-        "doc-security-reader@1.0.0|baseline-browser-mapping@2.11.21",
+        "doc-security-reader@1.0.0|baseline-browser-mapping@2.11.22",
         "doc-security-reader@1.0.0|caniuse-lite@1.0.30001810",
-        "doc-security-reader@1.0.0|electron-to-chromium@1.5.425",
+        "doc-security-reader@1.0.0|electron-to-chromium@1.5.427",
         "doc-security-reader@1.0.0|node-releases@2.0.55",
-        "doc-security-reader@1.0.0|update-browserslist-db@1.3.2"
+        "doc-security-reader@1.0.0|update-browserslist-db@1.3.3"
       ]
     },
     {
@@ -7272,19 +7272,19 @@
       "ref": "doc-security-reader@1.0.0|@jridgewell/resolve-uri@3.1.2"
     },
     {
-      "ref": "doc-security-reader@1.0.0|baseline-browser-mapping@2.11.21"
+      "ref": "doc-security-reader@1.0.0|baseline-browser-mapping@2.11.22"
     },
     {
       "ref": "doc-security-reader@1.0.0|caniuse-lite@1.0.30001810"
     },
     {
-      "ref": "doc-security-reader@1.0.0|electron-to-chromium@1.5.425"
+      "ref": "doc-security-reader@1.0.0|electron-to-chromium@1.5.427"
     },
     {
       "ref": "doc-security-reader@1.0.0|node-releases@2.0.55"
     },
     {
-      "ref": "doc-security-reader@1.0.0|update-browserslist-db@1.3.2",
+      "ref": "doc-security-reader@1.0.0|update-browserslist-db@1.3.3",
       "dependsOn": [
         "doc-security-reader@1.0.0|browserslist@4.28.9",
         "doc-security-reader@1.0.0|escalade@3.2.0",

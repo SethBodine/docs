@@ -13,6 +13,7 @@ import { analyseConfigFile, analysePemOrKey, isConfigExt, isPemExt, isSshKeyFile
 import { parsePe } from './lib/peParser.js';
 import { parseElf } from './lib/elfParser.js';
 import { entropyLabel } from './lib/entropy.js';
+import { analysePcap } from './lib/pcap/pcapAnalysis.js';
 import JSZip from 'jszip';
 
 // ─── PDF.js (lazy loaded to avoid SSR issues) ───────────────────────────────
@@ -56,7 +57,7 @@ const SUPPORTED_TYPES = {
 const ACCEPT_EXTENSIONS = '.pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.html,.htm,.csv,.xml,.svg,.rtf,' +
   '.har,.jar,.zip,.tar,.gz,.tgz,.bz2,.tbz2,.xz,.txz,.7z,.rar,' +
   '.env,.ini,.cfg,.conf,.config,.properties,.toml,.yaml,.yml,.json,.tf,.tfvars,.tfstate,' +
-  '.pem,.key,.crt,.cer,.csr,.exe,.dll,.sys,.scr,.elf,.so';
+  '.pem,.key,.crt,.cer,.csr,.exe,.dll,.sys,.scr,.elf,.so,.pcap,.pcapng,.cap';
 
 // ─── Risk helpers ────────────────────────────────────────────────────────────
 function riskLevel(findings) {
@@ -1011,7 +1012,7 @@ async function analyseBytes(raw, filename, depth = 0, budget = newBudget()) {
   } else if (magic?.kind === 'macho') {
     result = analyseBinaryStrings(raw, filename, magic.label);
   } else if (magic?.kind === 'pcap' || magic?.kind === 'pcapng') {
-    result = analysePcapStrings(raw, filename, magic.label);
+    result = await analysePcap(raw.slice(0).buffer, filename);
   } else if (ext === 'har') {
     result = await analyseHar(raw.slice(0).buffer);
   } else if (ext === 'pdf') {
@@ -1442,51 +1443,65 @@ function HarPreview({ entries, totalRequests }) {
   );
 }
 
-function analysePcapStrings(raw, filename, magicLabel) {
-  const findings = [];
-  const PCAP_SCAN_CAP = 50 * 1024 * 1024; // 50MB — bounded string scan, not full packet reassembly
-  const scanned = raw.length > PCAP_SCAN_CAP ? raw.slice(0, PCAP_SCAN_CAP) : raw;
-  const metadata = {
-    'Detected Format': magicLabel,
-    'File Size': `${(raw.length / 1024 / 1024).toFixed(1)} MB`,
-    'Scan Coverage': raw.length > PCAP_SCAN_CAP ? `First ${PCAP_SCAN_CAP / 1024 / 1024}MB of ${(raw.length / 1024 / 1024).toFixed(1)}MB` : 'Full file',
-  };
+function PcapPreview({ streams, dns, tls }) {
+  const [section, setSection] = useState('streams');
+  const [visibleCount, setVisibleCount] = useState(100);
 
-  const strings = extractAsciiStrings(scanned, 6);
-  const blob = strings.join('\n');
+  const tabBtn = (id, label, count) => (
+    <button
+      onClick={() => { setSection(id); setVisibleCount(100); }}
+      style={{
+        background: section === id ? 'var(--bg-elevated)' : 'none',
+        border: '1px solid var(--border)', borderBottom: section === id ? '2px solid var(--accent-green)' : '1px solid var(--border)',
+        borderRadius: '4px 4px 0 0', padding: '6px 12px', fontSize: 12, cursor: 'pointer',
+        color: section === id ? 'var(--text-primary)' : 'var(--text-muted)',
+      }}
+    >
+      {label} ({count})
+    </button>
+  );
 
-  // Shared secret detector catches Bearer/Basic auth headers, JWTs, API keys,
-  // connection strings, etc. that happen to survive as contiguous ASCII in the
-  // raw capture bytes (works for plaintext protocols: HTTP, FTP, Telnet, POP3,
-  // IMAP, SMTP — anything sent unencrypted).
-  findings.push(...scanForSecrets(blob, filename));
+  const list = section === 'streams' ? streams : section === 'tls' ? tls : dns;
+  const visible = (list || []).slice(0, visibleCount);
 
-  const patterns = [
-    { re: /USER\s+\S+|PASS\s+\S+/g, label: 'FTP/Telnet USER/PASS command', severity: 'high' },
-    { re: /https?:\/\/[^\s"'<>]{4,}/g, label: 'URL', severity: 'low' },
-    { re: /\b(?:\d{1,3}\.){3}\d{1,3}\b/g, label: 'IPv4 address', severity: 'info' },
-    { re: /Host:\s*[^\s\r\n]+/gi, label: 'HTTP Host header', severity: 'info' },
-    { re: /community\s*=\s*\S+/gi, label: 'SNMP community string', severity: 'high' },
-  ];
-  for (const { re, label, severity } of patterns) {
-    const matches = [...new Set(blob.match(re) || [])];
-    if (matches.length > 0) {
-      findings.push({ severity, category: 'Packet Capture', title: `${label} found in capture`, detail: matches.slice(0, 8).join(' | ') + (matches.length > 8 ? ` (+${matches.length - 8} more)` : '') });
-    }
-  }
-
-  findings.push({
-    severity: 'info', category: 'Format',
-    title: 'Bounded string/credential scan only — no packet or stream reconstruction',
-    detail: 'This pass extracts printable strings from the raw capture bytes and runs the shared secret detector against them. TLS SNI, JA3/JA4 fingerprinting, stream reassembly, and full protocol decoding are a separate, heavier phase.',
-  });
-
-  const urls = [...new Set(blob.match(/https?:\/\/[^\s"'<>]{4,}/g) || [])];
-  return {
-    findings, metadata, textContent: '',
-    externalLinks: urls.map(u => ({ url: u, context: 'Packet capture string' })),
-    previewData: { type: 'unsupported', ext: filename.split('.').pop() },
-  };
+  return (
+    <div>
+      <div style={{ display: 'flex', gap: 4, marginBottom: 10 }}>
+        {tabBtn('streams', 'TCP Streams', streams?.length || 0)}
+        {tabBtn('tls', 'TLS (SNI/JA3)', tls?.length || 0)}
+        {tabBtn('dns', 'DNS Queries', dns?.length || 0)}
+      </div>
+      {(!list || list.length === 0) ? (
+        <p style={{ color: 'var(--text-muted)', fontSize: 13 }}>Nothing in this category.</p>
+      ) : (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 4, maxHeight: 500, overflowY: 'auto' }}>
+          {section === 'streams' && visible.map((s, i) => (
+            <div key={i} style={{ display: 'flex', gap: 10, padding: '6px 10px', background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: 3, fontFamily: "'IBM Plex Mono', monospace", fontSize: 11 }}>
+              <span style={{ color: 'var(--accent-blue)', width: 50, flexShrink: 0 }}>{s.protocol}</span>
+              <span style={{ color: 'var(--text-secondary)', flex: 1, wordBreak: 'break-all' }}>{s.label}</span>
+              <span style={{ color: 'var(--text-muted)', flexShrink: 0 }}>{s.bytes}B{s.truncated ? ' (truncated)' : ''}</span>
+            </div>
+          ))}
+          {section === 'tls' && visible.map((t, i) => (
+            <div key={i} style={{ display: 'flex', gap: 10, padding: '6px 10px', background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: 3, fontFamily: "'IBM Plex Mono', monospace", fontSize: 11 }}>
+              <span style={{ color: 'var(--accent-green)', flex: 1 }}>{t.sni || '(no SNI)'}</span>
+              <span style={{ color: 'var(--text-muted)' }}>JA3: {t.ja3}</span>
+              <span style={{ color: 'var(--text-muted)', flexShrink: 0 }}>{t.client}</span>
+            </div>
+          ))}
+          {section === 'dns' && visible.map((d, i) => (
+            <div key={i} style={{ display: 'flex', gap: 10, padding: '6px 10px', background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: 3, fontFamily: "'IBM Plex Mono', monospace", fontSize: 11 }}>
+              <span style={{ color: d.response ? 'var(--accent-blue)' : 'var(--text-secondary)', width: 60, flexShrink: 0 }}>{d.response ? 'response' : 'query'}</span>
+              <span style={{ color: 'var(--text-secondary)', wordBreak: 'break-all' }}>{d.name}</span>
+            </div>
+          ))}
+        </div>
+      )}
+      {list && list.length > visibleCount && (
+        <ShowMoreButton remaining={list.length - visibleCount} onClick={() => setVisibleCount(n => n + 500)} />
+      )}
+    </div>
+  );
 }
 
 // ─── FULL VIEW COMPONENT ─────────────────────────────────────────────────────
@@ -1538,6 +1553,7 @@ function FullView({ file, previewData }) {
     if (type === 'csv' || type === 'xml') return 'Displays the raw file content as text — not executed, not rendered as markup.';
     if (type === 'archive') return `This is an archive — Full View lists its contents the same way Safe Preview does, with each entry's findings expandable.`;
     if (type === 'har') return `This is a HAR (HTTP capture) — Full View lists the requests the same way Safe Preview does. Full headers/cookies/bodies were scanned but are not displayed verbatim here.`;
+    if (type === 'pcap') return `This is a packet capture — Full View lists reassembled TCP streams, TLS handshake metadata (SNI/JA3), and DNS queries the same way Safe Preview does. Nothing was or could be decrypted; this is only what travelled in the clear.`;
     return `This format (${ext?.toUpperCase() || 'unknown'}) has no visual preview — there is nothing to convert or render. Full View will show the same as Safe Preview: check the Findings and Metadata tabs for what was actually found in this file.`;
   }
 
@@ -1650,7 +1666,17 @@ function FullView({ file, previewData }) {
     );
   }
 
-  // Genuinely nothing to show (EXE, ELF, Mach-O, PCAP, and anything else with
+  // PCAP — same stream/TLS/DNS lists as Safe Preview
+  if (type === 'pcap') {
+    return (
+      <div>
+        {closebar('Packet capture — listing reassembled traffic, no visual document to render.')}
+        <PcapPreview streams={previewData.streams} dns={previewData.dns} tls={previewData.tls} />
+      </div>
+    );
+  }
+
+  // Genuinely nothing to show (EXE, ELF, Mach-O, and anything else with
   // previewData.type === 'unsupported') — say so plainly instead of a blank screen.
   return (
     <div>
@@ -2043,6 +2069,10 @@ function DocumentPreview({ previewData, file }) {
     <ArchiveContents children={previewData.children} />,
     `${previewData.kind?.toUpperCase()} contents — each child file was recursively analysed. Expand a row to see its findings.`
   );
+  if (type === 'pcap') return wrap(
+    <PcapPreview streams={previewData.streams} dns={previewData.dns} tls={previewData.tls} />,
+    'Reassembled TCP streams, TLS handshake metadata (SNI/JA3), and DNS queries — traffic was never decrypted, only what travels in the clear.'
+  );
 
   return (
     <div style={{ padding: 32, textAlign: 'center', color: 'var(--text-muted)' }}>
@@ -2210,7 +2240,7 @@ export default function App() {
           <p style={{ fontSize: 11, color: 'var(--text-muted)', fontFamily: "'IBM Plex Mono', monospace", lineHeight: 1.8 }}>
             PDF · DOCX · XLSX · PPTX · HTML · CSV · XML · SVG · RTF<br />
             HAR · JAR · ZIP/TAR/GZIP/BZIP2/XZ/7Z/RAR · ENV/YAML/TOML/INI<br />
-            PEM/KEY/CRT · AWS/GCP/Azure/K8s configs · EXE/ELF (strings)
+            PEM/KEY/CRT · AWS/GCP/Azure/K8s configs · EXE/ELF · PCAP/PCAPNG
           </p>
           <p style={{ fontSize: 10.5, color: 'var(--text-muted)', fontFamily: "'IBM Plex Mono', monospace", marginTop: 10, opacity: 0.8 }}>
             Max {ARCHIVE_LIMITS.MAX_UPLOAD_BYTES / 1024 / 1024}MB per file · archives expand up to {ARCHIVE_LIMITS.MAX_TOTAL_EXPANDED_BYTES / 1024 / 1024}MB, {ARCHIVE_LIMITS.MAX_FILES_PER_ARCHIVE.toLocaleString()} files, {ARCHIVE_LIMITS.MAX_RECURSION_DEPTH} levels deep
@@ -2422,6 +2452,7 @@ export default function App() {
                     '📄 Filename & file type',
                     '📦 File size',
                     '⚠️ Risk level result',
+                    '📊 Finding count & categories',
                     '🖥️ Device type',
                     '🌍 Operating system',
                     '🧭 Browser',
@@ -2471,7 +2502,7 @@ export default function App() {
           File contents are analysed locally — never uploaded.
         </p>
         <p style={{ fontSize: 10, color: 'var(--text-muted)', fontFamily: "'IBM Plex Mono', monospace" }}>
-          Usage metadata (IP, filename, type, device, risk result) is logged for monitoring.
+          Usage metadata (IP, filename, type, device, risk result, finding categories) is logged for monitoring.
         </p>
         <p style={{ fontSize: 10, marginTop: 4 }}>
           <a

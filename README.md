@@ -17,14 +17,13 @@ A fully client-side document security analyser that runs entirely in the browser
 | HAR (Chrome/DevTools) | Authorization headers (Bearer/Basic, decoded), cookies/Set-Cookie, sensitive query params, POST bodies, JWTs, plaintext-HTTP endpoints |
 | JAR (Java Archive) | Recursive archive scan + MANIFEST.MF, code-signing detection, secrets in .properties/.xml/.yml resources |
 | ZIP / TAR / GZIP / BZIP2 / XZ (incl. .tgz/.tar.gz/.tbz2/.tar.bz2/.txz/.tar.xz) | Recursive extraction and scanning of every nested file, up to 5 levels deep, with hard resource-exhaustion limits (see below) |
-| 7Z / RAR | Full extraction via the real 7-Zip codec (compiled to WASM) — reads RAR4 fully and RAR5 read-only, same recursive scanning and limits as other archives. Encrypted entries/archives are detected and skipped, never attempted or prompted for |
-| 7-Zip (.7z) / RAR (.rar) | Recursive extraction via the real 7-Zip CLI compiled to WASM — one dependency covers both, since 7-Zip's own codec reads RAR natively. Password-protected entries are detected and skipped (reported as a finding) rather than attempted |
-| .env / .ini / .cfg / .conf / .properties / .toml / .yaml / .yml / .json | Shared secret scan + format-specific checks (Kubernetes kubeconfig, Docker registry auth, Terraform state, GCP service-account keys) |
+| 7-Zip (.7z) / RAR (.rar) | Full extraction via the real 7-Zip codec compiled to WASM — one dependency covers both formats, since 7-Zip's own codec reads RAR natively (RAR4 fully, RAR5 read-only). Same recursive scanning and limits as other archives. Encrypted entries/archives are detected and skipped — never attempted, never prompted for |
+| .env / .ini / .cfg / .conf / .properties / .toml / .yaml / .yml / .json / AWS `credentials`/`config` (no extension) | Shared secret scan + format-specific checks (AWS CLI credentials, Kubernetes kubeconfig, Docker registry auth, Terraform state, GCP service-account keys) |
 | PEM / KEY / CRT / CER / CSR / SSH keys | Private-key/certificate block classification, always-critical private-key detection |
 | EXE / DLL / SYS | Full PE32/PE32+ structural parsing: machine type, subsystem, compile timestamp, entry point, ASLR/DEP flags, per-section entropy (packing signal), full import table (DLL + function names) with suspicious-API classification (process injection, anti-debugging, persistence, credential access, keylogging, C2-adjacent networking) — plus the shared string/secret scan layered on top |
 | ELF (Linux/Unix binaries, any/no extension) | Full ELF header + section/program header parsing: class/endianness/machine/entry point, static vs. dynamic linking, interpreter path, `DT_NEEDED`/`RPATH`/`RUNPATH`, per-section entropy, dynamic symbol table (imported library functions) with the same suspicious-category classification — plus the shared string/secret scan |
 | Mach-O (macOS) | Magic-byte identification + printable-string scan (no dedicated structural parser yet) |
-| PCAP / PCAPNG | Magic-byte identification + bounded printable-string scan for plaintext credentials (FTP/Telnet USER/PASS, SNMP community strings, HTTP Host headers, IPs, URLs) — not full packet/stream reconstruction |
+| PCAP / PCAPNG | Full protocol analysis: link/IP/TCP/UDP decoding, TCP stream reassembly (handles out-of-order arrival and exact-retransmission dedup), HTTP request/response parsing, DNS parsing with name-compression support and tunneling-pattern heuristics, TLS ClientHello parsing with SNI extraction and JA3 fingerprinting, SNMP community-string extraction, and cleartext-credential detection for FTP/Telnet/POP3/IMAP/LDAP — verified against real captures and an actual TLS handshake (JA3 hash matched independently-computed ground truth from `tshark` exactly) |
 | Any other file | Falls back to a generic secret scan against decodable text content instead of a bare "unsupported" message |
 
 A file's actual byte signature is checked against its extension for every supported type — a renamed or spoofed file (e.g. an executable saved as `.pdf`, or a ZIP saved as `.txt`) is still identified and flagged as a **Format Spoofing** finding rather than silently mis-analysed or skipped.
@@ -40,11 +39,15 @@ Opening archives is the biggest new attack surface a static analyser can take on
 | Max individual extracted file | 100 MB |
 | Max files per archive | 10,000 |
 | Max archive nesting depth | 5 |
-| PCAP/binary string-scan coverage | First 50 MB |
+| PCAP/binary string-scan coverage | First 300 MB of the capture, first 5,000 TCP streams, 5 MB per stream |
 
 Archive entries with a path-traversal pattern (`../`, absolute paths) are detected and skipped rather than extracted — including cases where the underlying ZIP library normalizes the path internally before exposing it, by checking the archive's raw pre-normalization entry name. Nothing extracted from an archive is ever written to disk; everything stays in memory for the life of the analysis. GZIP and XZ streams are decompressed incrementally so a bomb is caught and aborted mid-stream rather than after the fact; BZIP2 uses a byte-bounded output sink for the same reason.
 
-**Not yet implemented:** Full PCAP protocol/stream reconstruction (TLS SNI, JA3/JA4, DNS analysis) is planned for a later phase. Mach-O binaries get string/secret scanning only, not the structural parsing PE and ELF now have.
+**Not yet implemented:** Mach-O binaries get string/secret scanning only, not the structural parsing PE and ELF now have. PCAP analysis never attempts TLS decryption (no key material is available, or sought) and doesn't do full RFC 793 TCP reassembly (no PAWS, no partial-overlap segment merging, no 32-bit sequence-number wraparound handling) — it correctly handles out-of-order arrival and exact retransmission for the vast majority of real captures, but a capture deliberately engineered to defeat that ordering could produce a garbled reassembly for that one stream rather than a crash.
+
+### PCAP — verified against a real network capture and an actual TLS handshake, not just written to the spec
+
+The DNS, TLS/JA3, HTTP, and SNMP parsers were checked against `tshark` (Wireshark's CLI) as ground truth, not just against the format specifications. Most notably: a real capture's TLS ClientHello — captured live via `tcpdump` while connecting to pypi.org — was fed through this pipeline's JA3 computation and produced `0149f47eabf9a20d0893e2a44e5a6323`, byte-for-byte identical to `tshark`'s own independently-computed JA3 hash for the same packet, including exact agreement on GREASE-value stripping. DNS name decompression was checked against 8 real compressed A-record answers, all correct. TCP stream reassembly was checked against a deliberately-crafted out-of-order capture (a secret split across two segments, with the second arriving first) and reassembled correctly.
 
 ### 7z/RAR — verified against real hostile fixtures, not just written and assumed to work
 
@@ -70,7 +73,7 @@ Suspicious-API findings (process injection, anti-debugging, persistence, credent
 - **XXE Injection** — SYSTEM/PUBLIC entity declarations in XML
 - **CSV Injection** — Formula-triggering cell prefixes
 - **RTF Exploits** — Known Equation Editor vulnerability signatures
-- **Credentials & Secrets** — a shared two-tier detector (`src/lib/secrets.js`) used by every analyser: AWS/GCP/Azure keys, GitHub/Slack/Discord tokens & webhooks, JWTs (structurally validated), private key blocks, database connection strings, HTTP Basic/Bearer auth (Basic is base64-decoded and validated before being called "confirmed"), generic API-key/password assignments. "Potential secret" (pattern match) is always distinguished from "Confirmed credential" (format/structure validated) to keep false positives down. Matched values are always redacted before they reach a finding, telemetry, or the UI.
+- **Credentials & Secrets** — a shared two-tier detector (`src/lib/secrets.js`) used by every analyser: AWS/GCP/Azure keys, GitHub/Slack/Discord tokens & webhooks, JWTs (structurally validated), private key blocks, database connection strings, HTTP Basic/Bearer auth (Basic is base64-decoded and validated before being called "confirmed"), generic API-key/password assignments. "Potential secret" (pattern match) is always distinguished from "Confirmed credential" (format/structure validated) to keep false positives down. Matched values are always redacted before they reach a finding, telemetry, or the UI — but where the match came from an assignment (`VARIABLE_NAME = value`, a named cookie, `heroku_api_key=...`, etc.), the variable/key name itself is shown in full, since the name isn't sensitive and is often exactly what's needed to find the line in a large file (a redacted value alone — `sk_l…9xYz` — could be any of a dozen assignments; `AWS_SECRET_ACCESS_KEY = sk_l…9xYz` isn't).
 
 ## Deploy to Cloudflare Pages
 
@@ -157,10 +160,9 @@ If not set, telemetry is silently skipped and everything else works normally.
 
 ## Privacy
 
-- All file parsing happens in the browser using WebAssembly and JavaScript
-- No telemetry, no analytics, no external requests
-- The `_headers` file enforces strict CSP to prevent any unintended outbound connections
-- `connect-src: 'self'` — the page cannot phone home even if the code tried to
+- **File contents are never transmitted** — all parsing happens in the browser using WebAssembly and JavaScript
+- Usage metadata **is** sent off-device when `VITE_DISCORD_WEBHOOK_URL` is configured — see "What is logged" above for exactly what that includes (IP, filename/extension/size, risk result, finding categories/counts, device/OS/browser/screen/language). This is opt-in at deploy time: unset the variable and telemetry is silently skipped entirely.
+- The `_headers` file's CSP intentionally allows exactly two external destinations — `discord.com` (the telemetry webhook) and `ip.b0x.workers.dev` (IP lookup for that telemetry) — and nothing else; `connect-src` blocks any other outbound request even if the code tried to make one
 
 ## Software Bill of Materials (SBOM)
 
@@ -181,10 +183,12 @@ Treat a diff in `sbom.cdx.json` the same as a diff in `package-lock.json` during
 - **pdfjs-dist** — PDF parsing
 - **mammoth** — DOCX → HTML conversion
 - **SheetJS (xlsx)** — Excel/PPTX parsing
-- **papaparse** — CSV parsing
+- CSV, PCAP/PCAPNG, DNS, TLS, HTTP-over-TCP, and SNMP parsing are hand-rolled (no library) — see the "PCAP" section above for how the latter group was verified
 - **JSZip** — ZIP/JAR/OOXML container inspection (bundled, not CDN)
 - **fflate** — streaming GZIP decompression
 - **seek-bzip** — BZIP2 decompression
 - **xz-decompress** — XZ decompression (WASM)
+- **7z-wasm** — 7-Zip/RAR extraction (the real 7-Zip codec, compiled to WASM)
+- **blueimp-md5** — MD5 for JA3 TLS fingerprinting (Web Crypto's SubtleCrypto doesn't support MD5)
 - **DOMPurify** — HTML sanitisation for content preview
 - **Cloudflare Pages** — Hosting with strict security headers

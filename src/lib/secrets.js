@@ -64,10 +64,11 @@ const MATCHERS = [
   {
     name: 'AWS Secret Access Key (context-matched)',
     // Only flagged as confirmed when it appears near an aws-secret-shaped key name
-    re: /(?:aws_secret_access_key|secretaccesskey|secret_key)\s*[:=]\s*["']?([A-Za-z0-9\/+=]{40})["']?/gi,
+    re: /(aws_secret_access_key|secretaccesskey|secret_key)\s*[:=]\s*["']?([A-Za-z0-9\/+=]{40})["']?/gi,
     tier: 'confirmed',
     category: 'Cloud Credentials',
-    group: 1,
+    nameGroup: 1,
+    group: 2,
   },
   {
     name: 'GCP Service Account Private Key',
@@ -227,17 +228,19 @@ const MATCHERS = [
   },
   {
     name: 'Okta API Token (context-matched)',
-    re: /okta[a-z_]{0,20}(?:api[_-]?token|token)\s*[:=]\s*["']?(00[A-Za-z0-9_-]{40})["']?/gi,
+    re: /(okta[a-z_]{0,20}(?:api[_-]?token|token))\s*[:=]\s*["']?(00[A-Za-z0-9_-]{40})["']?/gi,
     tier: 'confirmed',
     category: 'Cloud Credentials',
-    group: 1,
+    nameGroup: 1,
+    group: 2,
   },
   {
     name: 'Heroku API Key (context-matched)',
-    re: /heroku[a-z_]{0,20}(?:api[_-]?key|token)\s*[:=]\s*["']?([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})["']?/gi,
+    re: /(heroku[a-z_]{0,20}(?:api[_-]?key|token))\s*[:=]\s*["']?([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})["']?/gi,
     tier: 'confirmed',
     category: 'Cloud Credentials',
-    group: 1,
+    nameGroup: 1,
+    group: 2,
   },
   {
     name: 'Slack Webhook URL',
@@ -285,25 +288,28 @@ const MATCHERS = [
   },
   {
     name: 'Cookie / Set-Cookie with session value',
-    re: /(?:Set-Cookie|Cookie):\s*[^=;\n]{1,40}=([A-Za-z0-9%._-]{16,})/gi,
+    re: /(?:Set-Cookie|Cookie):\s*([^=;\n]{1,40})=([A-Za-z0-9%._-]{16,})/gi,
     tier: 'potential',
     category: 'Session / Auth Tokens',
-    group: 1,
+    nameGroup: 1,
+    group: 2,
   },
   {
     name: 'Generic API Key Assignment',
-    re: /\b(api[_-]?key|apikey|access[_-]?token|client[_-]?secret|secret[_-]?key)\s*[:=]\s*["']?([A-Za-z0-9_\-./+]{12,})["']?/gi,
+    re: /\b([A-Za-z0-9_.-]*(?:api[_-]?key|apikey|access[_-]?token|client[_-]?secret|secret[_-]?key)[A-Za-z0-9_.-]*)\s*[:=]\s*["']?([A-Za-z0-9_\-./+]{12,})["']?/gi,
     tier: 'potential',
     genericCatchAll: true,
     category: 'Generic Secret',
+    nameGroup: 1,
     group: 2,
   },
   {
     name: 'Generic Password Assignment',
-    re: /\b(password|passwd|pwd)\s*[:=]\s*["']?([^\s"'<>]{4,})["']?/gi,
+    re: /\b([A-Za-z0-9_.-]*(?:password|passwd|pwd)[A-Za-z0-9_.-]*)\s*[:=]\s*["']?([^\s"'<>]{4,})["']?/gi,
     tier: 'potential',
     genericCatchAll: true,
     category: 'Generic Secret',
+    nameGroup: 1,
     group: 2,
   },
   {
@@ -366,11 +372,19 @@ export function scanForSecrets(text, sourceLabel = '') {
       const severity = tier === 'confirmed' ? 'high' : 'medium';
       const label = tier === 'confirmed' ? 'Confirmed credential' : 'Potential secret';
 
+      // The variable/key name itself isn't sensitive — only its value is —
+      // so it's shown in full, unredacted, alongside the redacted value.
+      // This is what actually lets someone find the line in their file:
+      // "sk_l…9xYz" alone could be any of a dozen assignments in a large
+      // config; "AWS_SECRET_ACCESS_KEY = sk_l…9xYz" isn't.
+      const varName = matcher.nameGroup ? match[matcher.nameGroup] : null;
+      const namePrefix = varName ? `${varName.trim()} = ` : '';
+
       findings.push({
         severity,
         category: `Secrets — ${matcher.category}`,
         title: `${label}: ${matcher.name}`,
-        detail: `${sourceLabel ? sourceLabel + ' — ' : ''}${redact(raw)}${matcher.name.includes('Private Key') ? '' : ' (value redacted)'}${extraDetail}`,
+        detail: `${sourceLabel ? sourceLabel + ' — ' : ''}${namePrefix}${redact(raw)}${matcher.name.includes('Private Key') ? '' : ' (value redacted)'}${extraDetail}`,
       });
 
       if (findings.length >= MAX_FINDINGS_PER_FILE) break;
