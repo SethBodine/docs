@@ -2166,9 +2166,9 @@ export default function App() {
         flexWrap: 'nowrap',
       }}>
         <Shield size={18} color="var(--accent-green)" style={{ flexShrink: 0 }} />
-        <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 15, fontWeight: 600, color: 'var(--text-primary)', letterSpacing: '0.02em', flexShrink: 0 }}>
+        <h1 style={{ margin: 0, fontFamily: "'IBM Plex Mono', monospace", fontSize: 15, fontWeight: 600, color: 'var(--text-primary)', letterSpacing: '0.02em', flexShrink: 0 }}>
           DOC<span style={{ color: 'var(--accent-green)' }}>SCAN</span>
-        </span>
+        </h1>
         {/* Hide subtitle on narrow screens via inline media-like trick: use a span that collapses */}
         <span className="header-subtitle" style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: 'var(--text-muted)', borderLeft: '1px solid var(--border)', paddingLeft: 10, overflow: 'hidden', whiteSpace: 'nowrap', textOverflow: 'ellipsis', minWidth: 0 }}>
           Document Security Analyser
@@ -2491,6 +2491,46 @@ export default function App() {
                   <p style={{ fontSize: 12, color: 'var(--text-muted)' }}>{desc}</p>
                 </div>
               ))}
+            </div>
+
+            {/* FAQ */}
+            <div style={{ marginTop: 24 }}>
+              <h2 style={{ fontSize: 15, fontWeight: 600, color: 'var(--text-primary)', fontFamily: "'IBM Plex Mono', monospace", marginBottom: 10 }}>
+                Frequently Asked Questions
+              </h2>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                {[
+                  {
+                    q: 'Is my file ever uploaded to a server?',
+                    a: 'No. Every parser (PDF, Office, archive, binary, PCAP, etc.) runs entirely in your browser using JavaScript and WebAssembly. File contents are never transmitted anywhere. Only opt-in usage metadata — never file contents — may be logged; see the disclosure above.',
+                  },
+                  {
+                    q: 'What file types does DocScan support?',
+                    a: 'PDF, DOCX/DOC, XLSX/XLS/XLSM, PPTX/PPT, HTML, CSV, XML/SVG, RTF, HAR, JAR, ZIP/TAR/GZIP/BZIP2/XZ, 7-Zip/RAR, env/config/credential files, PEM/keys/certificates, EXE/DLL/SYS (PE), ELF binaries, Mach-O, and PCAP/PCAPNG network captures. Any other file type still gets a generic secret scan against decodable text.',
+                  },
+                  {
+                    q: 'What is "Format Spoofing"?',
+                    a: 'DocScan checks a file\'s actual byte signature against its file extension. If a file is renamed to disguise its real type — for example an executable saved with a .pdf extension — it is still identified correctly and flagged as a Format Spoofing finding rather than silently analysed as the wrong type or skipped.',
+                  },
+                  {
+                    q: 'What\'s the difference between a "potential secret" and a "confirmed credential"?',
+                    a: 'A potential secret is a pattern match (it looks like a key or token). A confirmed credential has additionally passed format or structural validation (for example, a JWT was checked for valid structure, or an HTTP Basic auth header was base64-decoded and validated). This distinction keeps false positives down. Matched values are always redacted before they appear in a finding.',
+                  },
+                  {
+                    q: 'Are there limits on archive or file size?',
+                    a: 'Yes — 250MB max upload size, 1GB max total decompressed size for a nested archive, 100MB max per extracted file, 10,000 files per archive, and 5 levels of nesting depth. These limits are enforced in code to prevent decompression-bomb and resource-exhaustion attacks.',
+                  },
+                  {
+                    q: 'Does DocScan detect malware?',
+                    a: 'No. It reports structural and behavioural signals — suspicious imports, macros, obfuscation, embedded secrets, and similar — as things to weigh, not verdicts. It does not attempt malware-family identification or scoring, since legitimate software can trigger the same signals (e.g. bash genuinely calls execve/fork).',
+                  },
+                ].map(({ q, a }) => (
+                  <details key={q} style={{ background: 'var(--bg-secondary)', border: '1px solid var(--border)', borderRadius: 6, padding: '10px 14px' }}>
+                    <summary style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-primary)', cursor: 'pointer' }}>{q}</summary>
+                    <p style={{ fontSize: 12, color: 'var(--text-secondary)', lineHeight: 1.7, marginTop: 8 }}>{a}</p>
+                  </details>
+                ))}
+              </div>
             </div>
           </div>
         )}

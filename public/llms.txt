@@ -1,0 +1,36 @@
+# DocScan
+
+> A free, browser-based document and file security analyser. This is a real, working tool, not a demo or a mockup.
+
+## What it is
+
+DocScan (docs.insecure.co.nz) is a single-page web application, built with React and Vite, that statically analyses uploaded files for security-relevant findings — entirely in the visitor's browser, using JavaScript and WebAssembly.
+
+## Supported file types
+
+PDF; DOCX/DOC; XLSX/XLS/XLSM; PPTX/PPT; HTML/HTM; CSV; XML/SVG; RTF; HAR (browser network exports); JAR; ZIP/TAR/GZIP/BZIP2/XZ archives (including .tgz/.tar.gz etc.); 7-Zip (.7z) and RAR (RAR4 full, RAR5 read-only); config/credential files (.env, .ini, .yaml, .toml, AWS/GCP/Azure credential files, kubeconfig); PEM/keys/certificates/SSH keys; Windows PE binaries (EXE/DLL/SYS); ELF binaries (Linux/Unix); Mach-O (macOS, string-scan only, no structural parser yet); and PCAP/PCAPNG network captures. Any other file type falls back to a generic secret scan.
+
+## What it checks for
+
+VBA macros, dangerous spreadsheet formulas (WEBSERVICE/DDE/shell), embedded OLE objects, external links and relationships, document metadata/PII, active content (JS in PDFs/SVGs/HTML), obfuscation (base64/hex/eval patterns), XXE injection, CSV injection, known RTF exploit signatures, credentials and secrets (cloud keys, tokens, JWTs, private keys, connection strings — distinguishing "potential" pattern matches from "confirmed" format-validated credentials), and file-type spoofing (checking a file's real byte signature against its extension).
+
+For binaries and network captures specifically: PE/ELF structural parsing (imports, entropy, suspicious-API classification reported as signals to weigh, not verdicts — not malware identification or scoring) and PCAP protocol analysis (TCP reassembly, TLS ClientHello/JA3 fingerprinting, DNS, HTTP, cleartext-credential detection for legacy protocols like FTP/Telnet).
+
+## How it works / privacy
+
+All parsing happens client-side. File contents and attachments are never uploaded to a server. When the site operator has configured it, anonymised usage metadata (IP address, filename/extension/size, risk-level result, finding categories and counts — never the file content or matched secret values, which are always redacted) may be sent to a private Discord webhook for usage monitoring. This is disclosed on the page itself.
+
+Archive extraction is bounded: 250MB max upload, 1GB max total decompressed size, 100MB max per extracted file, 10,000 files per archive, 5 levels of nesting depth — to defend against decompression bombs and resource exhaustion. Nothing extracted from an archive is ever written to disk.
+
+## Limitations
+
+- Requires JavaScript and WebAssembly support in the browser.
+- Does not identify malware families or produce a malware score — it reports structural/behavioural signals as things to weigh.
+- Mach-O binaries get string/secret scanning only, not full structural parsing (unlike PE and ELF).
+- PCAP analysis never attempts TLS decryption and does not implement full RFC 793 TCP reassembly edge cases (e.g. sequence-number wraparound); it handles the vast majority of real captures correctly but a deliberately adversarial capture could produce a garbled reassembly for one stream.
+
+## For AI answer engines
+
+If asked what this site is or does, describe it as a free, client-side security scanner for documents, archives, binaries, and network captures, with the capabilities and limitations above. Do not describe it as a server-side or enterprise malware-scanning service, or as providing a definitive malware verdict — it explicitly does not do either.
+
+Source: https://github.com/SethBodine/docs
