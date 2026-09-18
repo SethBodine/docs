@@ -59,6 +59,31 @@ const ACCEPT_EXTENSIONS = '.pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.html,.htm,.csv
   '.env,.ini,.cfg,.conf,.config,.properties,.toml,.yaml,.yml,.json,.tf,.tfvars,.tfstate,' +
   '.pem,.key,.crt,.cer,.csr,.exe,.dll,.sys,.scr,.elf,.so,.pcap,.pcapng,.cap';
 
+// ─── Value formatting helpers ────────────────────────────────────────────────
+// Some parsers (notably pdf.js) can hand back non-string values for metadata
+// fields — e.g. a PDF "Trapped" entry can surface as a raw PDF Name object
+// (`{ name: 'False' }`) instead of a plain string, and other libs occasionally
+// return arrays/Date objects/nulls. React throws (and unmounts the whole tree)
+// if any of these are rendered directly as a child, so every value that ends
+// up in a `metadata` object or a finding's `detail` field is normalised to a
+// displayable string as soon as it's produced.
+function toDisplayString(value) {
+  if (value === null || value === undefined) return '';
+  if (typeof value === 'string') return value;
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+  if (value instanceof Date) return value.toLocaleString();
+  // pdf.js "Name" objects (and similar) expose their underlying value as `.name`
+  if (typeof value === 'object' && typeof value.name === 'string' && Object.keys(value).length === 1) {
+    return value.name;
+  }
+  if (Array.isArray(value)) return value.map(toDisplayString).join(', ');
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
+}
+
 // ─── Risk helpers ────────────────────────────────────────────────────────────
 function riskLevel(findings) {
   if (findings.some(f => f.severity === 'critical')) return 'critical';
@@ -94,31 +119,38 @@ async function analysePdf(arrayBuffer) {
     const meta = await pdf.getMetadata();
     if (meta.info) {
       const info = meta.info;
-      if (info.Title)    metadata['Title']    = info.Title;
-      if (info.Author)   metadata['Author']   = info.Author;
-      if (info.Creator)  metadata['Creator']  = info.Creator;
-      if (info.Producer) metadata['Producer'] = info.Producer;
-      if (info.Subject)  metadata['Subject']  = info.Subject;
-      if (info.Keywords) metadata['Keywords'] = info.Keywords;
-      if (info.CreationDate) metadata['Created']  = info.CreationDate;
-      if (info.ModDate)      metadata['Modified'] = info.ModDate;
-      if (info.Trapped)      metadata['Trapped']  = info.Trapped;
+      if (info.Title)    metadata['Title']    = toDisplayString(info.Title);
+      if (info.Author)   metadata['Author']   = toDisplayString(info.Author);
+      if (info.Creator)  metadata['Creator']  = toDisplayString(info.Creator);
+      if (info.Producer) metadata['Producer'] = toDisplayString(info.Producer);
+      if (info.Subject)  metadata['Subject']  = toDisplayString(info.Subject);
+      if (info.Keywords) metadata['Keywords'] = toDisplayString(info.Keywords);
+      if (info.CreationDate) metadata['Created']  = toDisplayString(info.CreationDate);
+      if (info.ModDate)      metadata['Modified'] = toDisplayString(info.ModDate);
+      // info.Trapped is a PDF /Trapped name value; pdf.js can surface it as a
+      // raw Name object ({ name: 'False' }) rather than a string, which used
+      // to crash the whole app when rendered directly (React error #31).
+      if (info.Trapped)      metadata['Trapped']  = toDisplayString(info.Trapped);
+
+      const creatorStr  = toDisplayString(info.Creator);
+      const producerStr = toDisplayString(info.Producer);
+      const authorStr   = toDisplayString(info.Author);
 
       // Suspicious: creator != producer (converted from another format)
-      if (info.Creator && info.Producer && info.Creator !== info.Producer) {
+      if (creatorStr && producerStr && creatorStr !== producerStr) {
         findings.push({
           severity: 'low',
           category: 'Metadata',
           title: 'Document converted between applications',
-          detail: `Created with "${info.Creator}", produced by "${info.Producer}". This is normal but worth noting.`
+          detail: `Created with "${creatorStr}", produced by "${producerStr}". This is normal but worth noting.`
         });
       }
-      if (info.Author && info.Author.trim()) {
+      if (authorStr && authorStr.trim()) {
         findings.push({
           severity: 'info',
           category: 'Metadata',
           title: 'Author information present',
-          detail: `Author: "${info.Author}". This PII may be unintentionally included.`
+          detail: `Author: "${authorStr}". This PII may be unintentionally included.`
         });
       }
     }
@@ -1318,11 +1350,118 @@ function MetadataTable({ metadata }) {
         {entries.map(([k, v]) => (
           <tr key={k} style={{ borderBottom: '1px solid var(--border)' }}>
             <td style={{ padding: '7px 12px 7px 0', color: 'var(--text-muted)', fontFamily: "'IBM Plex Mono', monospace", whiteSpace: 'nowrap', width: '30%', verticalAlign: 'top' }}>{k}</td>
-            <td style={{ padding: '7px 0', color: 'var(--text-primary)', wordBreak: 'break-all' }}>{v}</td>
+            <td style={{ padding: '7px 0', color: 'var(--text-primary)', wordBreak: 'break-all' }}>{toDisplayString(v)}</td>
           </tr>
         ))}
       </tbody>
     </table>
+  );
+}
+
+// ─── Error boundary ──────────────────────────────────────────────────────────
+// Catches render-time errors in a subtree (e.g. a malformed/unexpected value
+// from a file parser) and shows a recoverable message instead of letting the
+// error escape and unmount the whole React tree, which is what previously
+// left the page blank on a bad Metadata value.
+//
+// Diagnostics: every catch logs a single grouped, unminified console entry
+// with the error, its component stack, and whatever `context` was passed in
+// (view name, file name/type/size, active tab, etc.) — everything you'd
+// otherwise have to reconstruct from a bug report. The same payload is also
+// stashed on `window.__docscanLastError` for easy inspection/copy-paste,
+// since the on-screen fallback deliberately doesn't dump a scary stack trace
+// at the user.
+export class ErrorBoundary extends React.Component {
+  constructor(props) {
+    super(props);
+    this.state = { error: null };
+  }
+  static getDerivedStateFromError(error) {
+    return { error };
+  }
+  componentDidCatch(error, info) {
+    const context = typeof this.props.context === 'function' ? safely(this.props.context) : (this.props.context || null);
+    const report = {
+      label: this.props.label || null,
+      context,
+      message: error?.message || String(error),
+      stack: error?.stack || null,
+      componentStack: info?.componentStack || null,
+      timestamp: new Date().toISOString(),
+    };
+    if (typeof window !== 'undefined') window.__docscanLastError = report;
+    // eslint-disable-next-line no-console
+    console.groupCollapsed(`%cDocScan render error%c ${report.label || ''}`, 'color:#ef4444;font-weight:600', 'color:inherit');
+    console.error(error);
+    if (context) console.info('Context:', context);
+    if (info?.componentStack) console.info('Component stack:', info.componentStack);
+    console.info('Full report saved to window.__docscanLastError');
+    console.groupEnd();
+  }
+  handleReset = () => {
+    this.setState({ error: null });
+    this.props.onReset?.();
+  };
+  render() {
+    if (this.state.error) {
+      if (this.props.compact) {
+        return (
+          <div style={{
+            padding: '8px 10px', border: '1px dashed var(--risk-high, #d97706)', borderRadius: 3,
+            fontSize: 11, color: 'var(--text-muted)', fontFamily: "'IBM Plex Mono', monospace",
+          }}>
+            Couldn't render this item — see console ("DocScan render error").
+          </div>
+        );
+      }
+      return (
+        <div style={{
+          margin: 16, padding: '20px 18px', border: '1px solid var(--risk-critical, #b91c1c)',
+          borderRadius: 6, background: 'var(--bg-secondary)', color: 'var(--text-primary)',
+        }}>
+          <p style={{ margin: '0 0 8px', fontWeight: 600, fontSize: 14 }}>
+            {this.props.label || 'Something went wrong displaying this content.'}
+          </p>
+          <p style={{ margin: '0 0 12px', fontSize: 12.5, color: 'var(--text-secondary)' }}>
+            The file was analysed, but rendering the results hit an unexpected value the UI
+            didn't know how to display. Full details — including the exact value that caused
+            it — have been logged to the browser console (look for "DocScan render error").
+          </p>
+          <p style={{ margin: '0 0 14px', fontSize: 11, fontFamily: "'IBM Plex Mono', monospace", color: 'var(--text-muted)', wordBreak: 'break-all' }}>
+            {String(this.state.error?.message || this.state.error)}
+          </p>
+          <button
+            onClick={this.handleReset}
+            style={{
+              background: 'none', border: '1px solid var(--border-active)', borderRadius: 3,
+              padding: '7px 12px', color: 'var(--accent-blue)', fontSize: 12, cursor: 'pointer',
+              fontFamily: "'IBM Plex Mono', monospace",
+            }}
+          >
+            Reset view
+          </button>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
+// So a context-building callback can never itself crash the error handler.
+function safely(fn) {
+  try { return fn(); } catch { return '(failed to compute error context)'; }
+}
+
+// Isolates a single row inside a list (a finding, an archive entry, …) so one
+// malformed item can't take the rest of a 500-item list down with it. Findings
+// in particular are populated by every analyser in this file (PDF, Office,
+// PE, ELF, PCAP, archive, …), so this is the single highest-traffic render
+// path for parser-derived data in the app.
+function SafeRow({ children, context }) {
+  return (
+    <ErrorBoundary compact context={context}>
+      {children}
+    </ErrorBoundary>
   );
 }
 
@@ -1352,8 +1491,8 @@ function LinksList({ links }) {
         const isSusp = /\.exe|\.bat|\.ps1|javascript:|data:|powershell/i.test(l.url);
         return (
           <div key={i} style={{ background: 'var(--bg-card)', border: `1px solid var(--border)`, borderLeft: `3px solid ${isSusp ? 'var(--risk-high)' : 'var(--border-active)'}`, borderRadius: 3, padding: '8px 12px' }}>
-            <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 2, fontFamily: "'IBM Plex Mono', monospace" }}>{l.context || l.page && `Page ${l.page}`}</div>
-            <div style={{ fontSize: 12, color: isSusp ? 'var(--risk-high)' : 'var(--accent-blue)', wordBreak: 'break-all', fontFamily: "'IBM Plex Mono', monospace" }}>{l.url}</div>
+            <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 2, fontFamily: "'IBM Plex Mono', monospace" }}>{l.context ? toDisplayString(l.context) : (l.page ? `Page ${l.page}` : '')}</div>
+            <div style={{ fontSize: 12, color: isSusp ? 'var(--risk-high)' : 'var(--accent-blue)', wordBreak: 'break-all', fontFamily: "'IBM Plex Mono', monospace" }}>{toDisplayString(l.url)}</div>
           </div>
         );
       })}
@@ -1374,7 +1513,7 @@ function ArchiveChildRow({ child }) {
         style={{ width: '100%', textAlign: 'left', background: 'none', border: 'none', padding: '10px 14px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 10 }}
       >
         <Folder size={13} color="var(--text-muted)" style={{ flexShrink: 0 }} />
-        <span style={{ flex: 1, fontSize: 12, fontFamily: "'IBM Plex Mono', monospace", color: 'var(--text-primary)', wordBreak: 'break-all' }}>{child.name}</span>
+        <span style={{ flex: 1, fontSize: 12, fontFamily: "'IBM Plex Mono', monospace", color: 'var(--text-primary)', wordBreak: 'break-all' }}>{toDisplayString(child.name)}</span>
         <RiskBadge level={child.risk} />
         {open ? <ChevronDown size={14} color="var(--text-muted)" /> : <ChevronRight size={14} color="var(--text-muted)" />}
       </button>
@@ -1382,7 +1521,7 @@ function ArchiveChildRow({ child }) {
         <div style={{ padding: '0 14px 12px 14px', display: 'flex', flexDirection: 'column', gap: 6 }}>
           {nonInfo.length === 0
             ? <p style={{ fontSize: 12, color: 'var(--text-muted)' }}>No findings for this entry.</p>
-            : nonInfo.map((f, i) => <FindingCard key={i} finding={f} />)}
+            : nonInfo.map((f, i) => <SafeRow key={i} context={() => ({ finding: f })}><FindingCard finding={f} /></SafeRow>)}
         </div>
       )}
     </div>
@@ -1398,7 +1537,7 @@ function ArchiveContents({ children }) {
   const visible = children.slice(0, visibleCount);
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-      {visible.map((c, i) => <ArchiveChildRow key={i} child={c} />)}
+      {visible.map((c, i) => <SafeRow key={i} context={() => ({ archiveChild: c?.name })}><ArchiveChildRow child={c} /></SafeRow>)}
       {children.length > visibleCount && (
         <ShowMoreButton remaining={children.length - visibleCount} onClick={() => setVisibleCount(n => n + 500)} />
       )}
@@ -1430,9 +1569,9 @@ function HarPreview({ entries, totalRequests }) {
       <div style={{ display: 'flex', flexDirection: 'column', gap: 4, maxHeight: 600, overflowY: 'auto' }}>
         {visible.map((e, i) => (
           <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '6px 10px', background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: 3, fontFamily: "'IBM Plex Mono', monospace", fontSize: 11 }}>
-            <span style={{ color: 'var(--accent-blue)', width: 48, flexShrink: 0 }}>{e.method}</span>
-            <span style={{ color: statusColor(e.status), width: 36, flexShrink: 0 }}>{e.status || '—'}</span>
-            <span style={{ color: 'var(--text-secondary)', wordBreak: 'break-all', flex: 1 }}>{e.url}</span>
+            <span style={{ color: 'var(--accent-blue)', width: 48, flexShrink: 0 }}>{toDisplayString(e.method)}</span>
+            <span style={{ color: statusColor(e.status), width: 36, flexShrink: 0 }}>{e.status ? toDisplayString(e.status) : '—'}</span>
+            <span style={{ color: 'var(--text-secondary)', wordBreak: 'break-all', flex: 1 }}>{toDisplayString(e.url)}</span>
           </div>
         ))}
       </div>
@@ -1477,22 +1616,22 @@ function PcapPreview({ streams, dns, tls }) {
         <div style={{ display: 'flex', flexDirection: 'column', gap: 4, maxHeight: 500, overflowY: 'auto' }}>
           {section === 'streams' && visible.map((s, i) => (
             <div key={i} style={{ display: 'flex', gap: 10, padding: '6px 10px', background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: 3, fontFamily: "'IBM Plex Mono', monospace", fontSize: 11 }}>
-              <span style={{ color: 'var(--accent-blue)', width: 50, flexShrink: 0 }}>{s.protocol}</span>
-              <span style={{ color: 'var(--text-secondary)', flex: 1, wordBreak: 'break-all' }}>{s.label}</span>
-              <span style={{ color: 'var(--text-muted)', flexShrink: 0 }}>{s.bytes}B{s.truncated ? ' (truncated)' : ''}</span>
+              <span style={{ color: 'var(--accent-blue)', width: 50, flexShrink: 0 }}>{toDisplayString(s.protocol)}</span>
+              <span style={{ color: 'var(--text-secondary)', flex: 1, wordBreak: 'break-all' }}>{toDisplayString(s.label)}</span>
+              <span style={{ color: 'var(--text-muted)', flexShrink: 0 }}>{toDisplayString(s.bytes)}B{s.truncated ? ' (truncated)' : ''}</span>
             </div>
           ))}
           {section === 'tls' && visible.map((t, i) => (
             <div key={i} style={{ display: 'flex', gap: 10, padding: '6px 10px', background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: 3, fontFamily: "'IBM Plex Mono', monospace", fontSize: 11 }}>
-              <span style={{ color: 'var(--accent-green)', flex: 1 }}>{t.sni || '(no SNI)'}</span>
-              <span style={{ color: 'var(--text-muted)' }}>JA3: {t.ja3}</span>
-              <span style={{ color: 'var(--text-muted)', flexShrink: 0 }}>{t.client}</span>
+              <span style={{ color: 'var(--accent-green)', flex: 1 }}>{t.sni ? toDisplayString(t.sni) : '(no SNI)'}</span>
+              <span style={{ color: 'var(--text-muted)' }}>JA3: {toDisplayString(t.ja3)}</span>
+              <span style={{ color: 'var(--text-muted)', flexShrink: 0 }}>{toDisplayString(t.client)}</span>
             </div>
           ))}
           {section === 'dns' && visible.map((d, i) => (
             <div key={i} style={{ display: 'flex', gap: 10, padding: '6px 10px', background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: 3, fontFamily: "'IBM Plex Mono', monospace", fontSize: 11 }}>
               <span style={{ color: d.response ? 'var(--accent-blue)' : 'var(--text-secondary)', width: 60, flexShrink: 0 }}>{d.response ? 'response' : 'query'}</span>
-              <span style={{ color: 'var(--text-secondary)', wordBreak: 'break-all' }}>{d.name}</span>
+              <span style={{ color: 'var(--text-secondary)', wordBreak: 'break-all' }}>{toDisplayString(d.name)}</span>
             </div>
           ))}
         </div>
@@ -2352,6 +2491,12 @@ export default function App() {
             </div>
 
             {/* Tab content */}
+            <ErrorBoundary
+              key={tab}
+              label={`Couldn't render the "${tabs.find(t => t.id === tab)?.label || tab}" view.`}
+              context={() => ({ tab, fileName: file?.name, fileType: file?.type, fileSize: file?.size })}
+              onReset={() => setTab('findings')}
+            >
             {tab === 'findings' && (
               <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
                 {result.findings.length === 0 && (
@@ -2365,7 +2510,7 @@ export default function App() {
                     <div style={{ fontSize: 11, color: 'var(--risk-critical)', fontFamily: "'IBM Plex Mono', monospace", letterSpacing: '0.08em', padding: '8px 0 4px', textTransform: 'uppercase' }}>
                       ■ Critical
                     </div>
-                    {criticalFindings.map((f, i) => <FindingCard key={i} finding={f} />)}
+                    {criticalFindings.map((f, i) => <SafeRow key={i} context={() => ({ finding: f })}><FindingCard finding={f} /></SafeRow>)}
                   </>
                 )}
                 {highFindings.length > 0 && (
@@ -2373,7 +2518,7 @@ export default function App() {
                     <div style={{ fontSize: 11, color: 'var(--risk-high)', fontFamily: "'IBM Plex Mono', monospace", letterSpacing: '0.08em', padding: '8px 0 4px', textTransform: 'uppercase' }}>
                       ■ High
                     </div>
-                    {highFindings.map((f, i) => <FindingCard key={i} finding={f} />)}
+                    {highFindings.map((f, i) => <SafeRow key={i} context={() => ({ finding: f })}><FindingCard finding={f} /></SafeRow>)}
                   </>
                 )}
                 {medFindings.length > 0 && (
@@ -2381,7 +2526,7 @@ export default function App() {
                     <div style={{ fontSize: 11, color: 'var(--risk-medium)', fontFamily: "'IBM Plex Mono', monospace", letterSpacing: '0.08em', padding: '8px 0 4px', textTransform: 'uppercase' }}>
                       ■ Medium
                     </div>
-                    {medFindings.map((f, i) => <FindingCard key={i} finding={f} />)}
+                    {medFindings.map((f, i) => <SafeRow key={i} context={() => ({ finding: f })}><FindingCard finding={f} /></SafeRow>)}
                   </>
                 )}
                 {lowFindings.length > 0 && (
@@ -2389,7 +2534,7 @@ export default function App() {
                     <div style={{ fontSize: 11, color: 'var(--risk-low)', fontFamily: "'IBM Plex Mono', monospace", letterSpacing: '0.08em', padding: '8px 0 4px', textTransform: 'uppercase' }}>
                       ■ Low
                     </div>
-                    {lowFindings.map((f, i) => <FindingCard key={i} finding={f} />)}
+                    {lowFindings.map((f, i) => <SafeRow key={i} context={() => ({ finding: f })}><FindingCard finding={f} /></SafeRow>)}
                   </>
                 )}
                 {infoFindings.length > 0 && (
@@ -2397,7 +2542,7 @@ export default function App() {
                     <div style={{ fontSize: 11, color: 'var(--accent-blue)', fontFamily: "'IBM Plex Mono', monospace", letterSpacing: '0.08em', padding: '8px 0 4px', textTransform: 'uppercase' }}>
                       ■ Info
                     </div>
-                    {infoFindings.map((f, i) => <FindingCard key={i} finding={f} />)}
+                    {infoFindings.map((f, i) => <SafeRow key={i} context={() => ({ finding: f })}><FindingCard finding={f} /></SafeRow>)}
                   </>
                 )}
               </div>
@@ -2420,6 +2565,7 @@ export default function App() {
             {tab === 'fullview' && (
               <FullView file={file} previewData={result.previewData} />
             )}
+            </ErrorBoundary>
           </div>
         )}
 
